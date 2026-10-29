@@ -2,7 +2,7 @@
 
 This reference describes the tools currently registered by `server.py` and the JSON actions sent to the MuseScore QML plugin. Use the Python function names when calling MCP. Use the camelCase action names only inside `processSequence`.
 
-The server currently registers 27 public tools.
+The server currently registers 44 public tools.
 
 ## Connection and score inspection
 
@@ -10,7 +10,7 @@ The server currently registers 27 public tools.
 |---|---|---|
 | `connect_to_musescore` | none | Opens the WebSocket client connection to `ws://localhost:8765`. Returns `{success: bool}`. |
 | `ping_musescore` | none | Sends the `ping` action. A healthy plugin returns `pong`. |
-| `get_score` | none | Requests the current score analysis, including title, measure data, staves, voices, durations, lyrics, and pitch information when available. |
+| `get_score` | `start_measure: int = 1`, `end_measure: int \| None = None`, `staves: list[int] \| None = None`, `format: "lilypond" \| "json" = "lilypond"` | Reads a window of the score (16 measures by default) as LilyPond with a `% m.N` comment at every barline, or as the raw JSON analysis. The header gives the total number of measures; page through long scores with `start_measure`, and read only some staves of large scores with `staves`. |
 | `show_score` | `first_measure: int = 1`, `last_measure: int \| None = None` | Read-only. Renders the score as sheet music in MCP Apps hosts (VexFlow viewer). Other hosts get only a text summary; use `get_score` for data. |
 
 Call `ping_musescore` before a mutation. Call `get_score` before and after a complex edit.
@@ -30,7 +30,7 @@ Call `ping_musescore` before a mutation. Call `get_score` before and after a com
 | `select_current_measure` | none | Selects the current measure. |
 | `select_custom_range` | `start_tick: int`, `end_tick: int`, `start_staff: int`, `end_staff: int` | Selects a precise tick range across one or more zero-based staves. MuseScore uses 480 ticks per quarter note in this project. |
 
-Navigation wrappers may return a response envelope from the bridge. Read the returned state instead of assuming a move succeeded.
+Navigation tools return the selection as LilyPond with measure/beat/staff metadata. On a plugin error they return the raw response envelope instead; read it rather than assuming a move succeeded.
 
 ## Notes, rests, lyrics, and measures
 
@@ -45,6 +45,7 @@ Duration values are JSON objects such as `{"numerator": 1, "denominator": 4}` fo
 | `insert_measure` | none | Inserts a measure at the current position. |
 | `append_measure` | `count: int = 1` | Appends one or more measures to the end of the score. |
 | `delete_selection` | `measure: int | null = null` | Deletes the current selection, or a specified measure when provided. Treat as destructive and verify immediately. |
+| `delete_measures` | `start_measure: int`, `end_measure: int \| None = None` | Removes whole measures on every staff (MuseScore's Remove selected range). Later measures are renumbered, so remove ranges from the last one backwards. |
 | `undo` | none | Undoes the last MuseScore operation. |
 
 ## Staff, instruments, and time
@@ -55,6 +56,42 @@ Duration values are JSON objects such as `{"numerator": 1, "denominator": 4}` fo
 | `set_staff_mute` | `staff: int`, `mute: bool` | Mutes or unmutes a zero-based staff. |
 | `set_instrument_sound` | `staff: int`, `instrument_id: str` | Changes the sound/instrument identifier for a zero-based staff. |
 | `set_time_signature` | `numerator: int = 4`, `denominator: int = 4` | Sets the time signature at the current score context. |
+| `set_tempo` | `bpm: float`, `measure: int \| None = None` | Adds a tempo marking (quarter-note BPM) at the cursor, or at the start of `measure`. |
+
+## Repeat structure and coloring
+
+Measure ranges are 1-based and inclusive. Staff ranges in these tools are 0-based and inclusive (`first_staff`, `last_staff`).
+
+| MCP tool | Parameters | What it does |
+|---|---|---|
+| `find_repeated_measures` | `start_measure: int = 1`, `end_measure: int \| None = None`, `staves: list[int] \| None = None`, `highlight: bool = false` | Reads the score in 16-measure chunks and returns `passages` (whole-score repeats and repeats with 1st/2nd endings, each with `duplicate_measures`, `saves_measures` and the `apply` tool calls) and `measure_repeats` (per-staff 1/2/4-bar repeats, grouped by staves). `highlight` colors duplicates in the score and returns a legend. |
+| `set_repeat_barlines` | `start_measure: int`, `end_measure: int`, `play_count: int = 2`, `clear: bool = false` | Sets start/end repeat barlines. Needs MuseScore 4.6+; on older versions it selects the bars and returns `fallback: "manual"` with palette instructions. |
+| `add_volta` | `start_measure: int`, `end_measure: int \| None = None`, `endings: list[int] = [1]`, `text: str \| None = None` | Experimental volta (ending bracket). Check the score afterwards; if it fails or nothing appears, the bars are selected for the palette. |
+| `prepare_measure_repeat` | `start_measure: int`, `end_measure: int \| None = None`, `bars: 1 \| 2 \| 4 = 1`, `first_staff: int = 0`, `last_staff: int \| None = None` | Selects the bars to replace with a measure-repeat sign and returns the palette step. The plugin API cannot place these signs itself. |
+| `color_range` | `start_measure: int`, `end_measure: int \| None = None`, `first_staff: int = 0`, `last_staff: int \| None = None`, `color: str = "#d62728"`, `voices: list[int] \| None = None`, `start_beat: float \| None = None`, `end_beat: float \| None = None` | Colors notes and rests (stems, beams, accidentals, dots, ties) in a range. `start_beat` (in `start_measure`, fractions allowed, 3.5 = "and" of 3) and `end_beat` (in `end_measure`, inclusive) color only part of a bar; a beat is the time signature's denominator. Only notes/rests that start inside the span are colored. |
+| `clear_color` | `start_measure: int`, `end_measure: int \| None = None`, `first_staff: int = 0`, `last_staff: int \| None = None`, `start_beat`, `end_beat` | Resets a range (optionally part of a bar) to black. |
+| `highlight_bars` | `start_measure: int`, `end_measure: int \| None = None`, `first_staff: int = 0`, `last_staff: int \| None = None` (defaults to `first_staff`), `color: str = "#ffe600"`, `opacity: float = 0.35`, `start_beat`, `end_beat` | Highlighter band behind the bars of each staff: a thick, semi-transparent text line drawn behind the notes. Experimental; check the score. |
+| `add_label` | `measure: int`, `text: str`, `staff: int = 0`, `background: str = "#fff2a8"`, `border: str = "#000000"` | Boxed staff text with a colored background at the start of a measure. |
+| `clear_highlights` | `start_measure: int = 1`, `end_measure: int \| None = None` (end of score), `first_staff: int = 0`, `last_staff: int \| None = None`, `kinds: ["highlights", "labels"]` | Removes highlight bands and boxed labels in the range. |
+
+Coloring notes (`color_range`) changes the notation itself; highlights and labels are separate score elements, so `clear_highlights` removes them without touching note colors.
+
+To compress a score: call `find_repeated_measures`, then run each passage's `apply` steps, starting from the last passage. Re-run the analysis after deleting measures, because measure numbers change.
+
+## Drum charts and measure-repeat signs
+
+| MCP tool | Parameters | What it does |
+|---|---|---|
+| `find_groove_sections` | `staves: list[int] \| None = None`, `start_measure: int = 1`, `end_measure: int \| None = None`, `tolerance: float = 0.85` | Per staff (drum staves by default): a `road_map`, `sections` (groove bar, `exact` copies, `near` copies with `extra`/`missing` hits, `fills`, `proposed_repeat_signs`, `collapse`), and `apply_exact_copies` ready for `apply_measure_repeats`. Bars that already hold repeat signs count as copies. |
+| `apply_measure_repeats` | `staff: int`, `groups: list[{start, end?, bars: 1\|2\|4}]`, `score_path: str \| None = None` | Writes measure-repeat signs into the score file and reloads the score. Returns `applied`, `unchanged`, `skipped` (with reasons, e.g. a tie crossing the barline), `dropped` content, `backup`, `reopened`. |
+| `restore_backup` | `backup: str \| None = None`, `score_path: str \| None = None` | Restores the newest (or given) backup of the open score and reloads it; the current version is backed up first. |
+| `collapse_to_repeat` | `start: int`, `end: int`, `force: bool = false` | Keeps bar `start` with repeat barlines and play count `end - start + 1`, deletes the rest. Affects every staff; refuses when any staff differs unless `force`. Use in a part-only score. |
+| `make_part_score` | `staves: list[int]`, `output_path: str \| None = None` | Saves a copy, opens it, and removes all other parts (MuseScore 4.7+). Staff indices restart from 0 in the new score. |
+| `add_rehearsal_mark` | `measure: int`, `text: str` | Rehearsal mark at a measure start (experimental). |
+
+Workflow for a chart: `find_groove_sections` → show the road map and near copies to the user → `apply_measure_repeats` with the approved groups (one call per staff). For "groove bar x N": `make_part_score` → `collapse_to_repeat` per section, from the last section backwards.
+
+`apply_measure_repeats` reloads the score, which resets MuseScore's undo history; undo with `restore_backup`, not Ctrl+Z.
 
 ## Batch execution
 
@@ -69,8 +106,12 @@ getScore, addNote, addRest, addTuplet, appendMeasure, deleteSelection,
 getCursorInfo, goToMeasure, nextElement, prevElement, nextStaff, prevStaff,
 selectCurrentMeasure, processSequence, insertMeasure, goToFinalMeasure,
 goToBeginningOfScore, setTimeSignature, addLyrics, addInstrument,
-setStaffMute, setInstrumentSound, setTempo
+setStaffMute, setInstrumentSound, setTempo, selectMeasures, deleteMeasures,
+setRepeatBarlines, addVolta, colorRange, setStyle, addRehearsalMark, removeParts,
+addHighlight, addLabel, clearHighlights
 ```
+
+The range actions take `startMeasure`/`endMeasure` (1-based, inclusive) and `startStaff`/`endStaff` (0-based, `endStaff` exclusive).
 
 Each action uses a `params` object. Examples:
 
@@ -84,7 +125,7 @@ Each action uses a `params` object. Examples:
 }
 ```
 
-`setTempo` is accepted by the QML sequence dispatcher but does not currently have a direct Python MCP wrapper. `syncStateToSelection` is also an internal QML action, not a public MCP tool.
+`syncStateToSelection` is an internal QML action, not a public MCP tool.
 
 ## Names not currently exposed
 

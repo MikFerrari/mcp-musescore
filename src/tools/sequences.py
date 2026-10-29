@@ -17,7 +17,11 @@ def setup_sequence_tools(mcp, client: MuseScoreClient):
             "Allowed actions: getScore, addNote, addRest, addTuplet, appendMeasure, deleteSelection, "
             "getCursorInfo, goToMeasure, nextElement, prevElement, nextStaff, prevStaff, "
             "selectCurrentMeasure, insertMeasure, goToFinalMeasure, goToBeginningOfScore, "
-            "setTimeSignature, addLyrics, addInstrument, setStaffMute, setInstrumentSound, setTempo. "
+            "setTimeSignature, addLyrics, addInstrument, setStaffMute, setInstrumentSound, setTempo, "
+            "selectMeasures, deleteMeasures, setRepeatBarlines, addVolta, colorRange, setStyle, "
+            "addRehearsalMark, removeParts, addHighlight, addLabel, clearHighlights. "
+            "Measure ranges use startMeasure/endMeasure (1-based, inclusive) and startStaff/endStaff "
+            "(0-based, endStaff exclusive). "
             "Processing stops at the first invalid action."
         ),
         tags={"sequence"},

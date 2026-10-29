@@ -25,5 +25,17 @@ __all__ = [
     "setTimeSignatureAction",
     "undoAction",
     "nextStaffAction",
-    "prevStaffAction"
+    "prevStaffAction",
+    "setTempoAction",
+    "selectMeasuresAction",
+    "deleteMeasuresAction",
+    "setRepeatBarlinesAction",
+    "addVoltaAction",
+    "colorRangeAction",
+    "setStyleAction",
+    "addRehearsalMarkAction",
+    "removePartsAction",
+    "addHighlightAction",
+    "addLabelAction",
+    "clearHighlightsAction",
 ]

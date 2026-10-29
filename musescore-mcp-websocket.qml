@@ -61,6 +61,7 @@ MuseScore {
             // Selection
             case "selectCurrentMeasure":    return selectCurrentMeasure(command.params);
             case "selectCustomRange":       return selectCustomRange(command.params);
+            case "selectMeasures":          return selectMeasuresAction(command.params);
 
             // Notes & Music
             case "addNote":                 return addNote(command.params);
@@ -72,6 +73,7 @@ MuseScore {
             case "appendMeasure":           return appendMeasure(command.params);
             case "insertMeasure":           return insertMeasure(command.params);
             case "deleteSelection":         return deleteSelection(command.params);
+            case "deleteMeasures":          return deleteMeasures(command.params);
 
             // Staff & Instruments
             case "addInstrument":           return addInstrument(command.params);
@@ -79,6 +81,23 @@ MuseScore {
             case "setInstrumentSound":      return setInstrumentSound(command.params);
             case "setTimeSignature":        return setTimeSignature(command.params);
             case "setTempo":                return setTempo(command.params);
+
+            // Repeats & Formatting
+            case "setRepeatBarlines":       return setRepeatBarlines(command.params);
+            case "addVolta":                return addVolta(command.params);
+            case "colorRange":              return colorRange(command.params);
+            case "setStyle":                return setStyle(command.params);
+            case "addRehearsalMark":        return addRehearsalMark(command.params);
+            case "addHighlight":            return addHighlight(command.params);
+            case "addLabel":                return addLabel(command.params);
+            case "clearHighlights":         return clearHighlights(command.params);
+
+            // Score files & parts
+            case "scoreFileInfo":           return scoreFileInfo();
+            case "saveScore":               return saveScore();
+            case "openScore":               return openScore(command.params);
+            case "reopenScore":             return reopenScore(command.params);
+            case "removeParts":             return removeParts(command.params);
 
             default:
                 throw new Error("Unknown command: " + command.action);
@@ -97,6 +116,100 @@ MuseScore {
             }
         }
         return missing.length > 0 ? { error: "Missing required parameters: " + missing.join(", ") } : { valid: true };
+    }
+
+    // ========================================
+    // MEASURE HELPERS
+    // ========================================
+
+    // Measure object for a 1-based measure number, or null when out of range.
+    function getMeasure(number) {
+        if (!curScore || number < 1) return null;
+        var m = curScore.firstMeasure;
+        for (var i = 1; m && i < number; i++) {
+            m = m.nextMeasure;
+        }
+        return m;
+    }
+
+    function measureStartTick(m) {
+        return m.firstSegment.tick;
+    }
+
+    function measureEndTick(m) {
+        return m.nextMeasure ? measureStartTick(m.nextMeasure) : curScore.lastSegment.tick;
+    }
+
+    // Resolve a 1-based measure range (and optional staff range) to ticks.
+    // endStaff is exclusive and defaults to the last staff.
+    function measureRange(params) {
+        var validation = validateParams(params, ["startMeasure"]);
+        if (!validation.valid) return validation;
+
+        var endMeasure = params.endMeasure || params.startMeasure;
+        var first = getMeasure(params.startMeasure);
+        var last = getMeasure(endMeasure);
+        if (!first || !last || endMeasure < params.startMeasure) {
+            return { error: "Invalid measure range " + params.startMeasure + "-" + endMeasure + " (score has " + curScore.nmeasures + " measures)" };
+        }
+
+        var startStaff = params.startStaff !== undefined ? params.startStaff : 0;
+        var endStaff = params.endStaff !== undefined && params.endStaff !== null ? params.endStaff : curScore.nstaves;
+        if (startStaff < 0 || endStaff > curScore.nstaves || startStaff >= endStaff) {
+            return { error: "Invalid staff range " + startStaff + "-" + endStaff + " (score has " + curScore.nstaves + " staves, endStaff is exclusive)" };
+        }
+
+        return {
+            valid: true,
+            startMeasure: params.startMeasure,
+            endMeasure: endMeasure,
+            firstMeasure: first,
+            lastMeasure: last,
+            startTick: measureStartTick(first),
+            endTick: measureEndTick(last),
+            startStaff: startStaff,
+            endStaff: endStaff
+        };
+    }
+
+    // Length of one beat in ticks: the time signature's denominator (a quarter in 4/4, an eighth in 6/8).
+    function beatTicks(m) {
+        var sig = m.timesigActual;
+        return sig && sig.denominator ? 1920 / sig.denominator : 480;
+    }
+
+    // Narrow a measure range to beats: startBeat (1-based, fractions allowed) in the first measure,
+    // endBeat (inclusive, the whole beat) in the last measure. Returns an error object or the range.
+    function applyBeats(range, params) {
+        if (params.startBeat !== undefined && params.startBeat !== null) {
+            var startOffset = (params.startBeat - 1) * beatTicks(range.firstMeasure);
+            if (params.startBeat < 1 || range.startTick + startOffset >= measureEndTick(range.firstMeasure)) {
+                return { error: "Beat " + params.startBeat + " is outside measure " + range.startMeasure };
+            }
+            range.startTick += Math.round(startOffset);
+        }
+        if (params.endBeat !== undefined && params.endBeat !== null) {
+            var lastStart = measureStartTick(range.lastMeasure);
+            var endTick = lastStart + Math.round(params.endBeat * beatTicks(range.lastMeasure));
+            if (params.endBeat < 1 || endTick > range.endTick) {
+                return { error: "Beat " + params.endBeat + " is outside measure " + range.endMeasure };
+            }
+            range.endTick = endTick;
+        }
+        if (range.startTick >= range.endTick) return { error: "The beat range is empty" };
+        return range;
+    }
+
+    function selectMeasureRange(range) {
+        curScore.selection.clear();
+        curScore.selection.selectRange(range.startTick, range.endTick, range.startStaff, range.endStaff);
+        selectionState = {
+            startStaff: range.startStaff,
+            endStaff: range.endStaff,
+            startTick: range.startTick,
+            elements: {},
+            totalDuration: range.endTick - range.startTick
+        };
     }
 
     function executeWithUndo(operation) {
@@ -214,6 +327,13 @@ MuseScore {
 
     function processElement(element) {
         if (!element) return null;
+        if (element.name === "MeasureRepeat") {
+            return {
+                name: element.name,
+                numMeasures: element.subtype || 1,
+                durationTicks: element.actualDuration ? element.actualDuration.ticks : 0
+            };
+        }
         if (element.name !== "Chord" && element.name !== "Rest") return null;
 
         var base = {
@@ -271,7 +391,7 @@ MuseScore {
             success: true, 
             message: response, 
             currentSelection: selectionState,
-            currentScore: getScoreSummary()
+            currentScore: getScoreSummary({ includeElements: false })
         };
     }
 
@@ -283,8 +403,10 @@ MuseScore {
             "getScore", "addNote", "addRest", "addTuplet", "appendMeasure", "deleteSelection",
             "getCursorInfo", "goToMeasure", "nextElement", "prevElement", "nextStaff", "prevStaff",
             "selectCurrentMeasure", "processSequence", "insertMeasure", "goToFinalMeasure",
-            "goToBeginningOfScore", "setTimeSignature", "addLyrics", "addInstrument",    
-            "setStaffMute", "setInstrumentSound", "setTempo"
+            "goToBeginningOfScore", "setTimeSignature", "addLyrics", "addInstrument",
+            "setStaffMute", "setInstrumentSound", "setTempo",
+            "selectMeasures", "setRepeatBarlines", "addVolta", "colorRange", "deleteMeasures",
+            "setStyle", "addRehearsalMark", "removeParts", "addHighlight", "addLabel", "clearHighlights"
         ];
 
         try {
@@ -384,7 +506,7 @@ MuseScore {
         return { 
             success: true, 
             currentSelection: selectionState, 
-            currentScore: params && params.verbose !== "false" ? getScoreSummary() : null
+            currentScore: params && params.verbose !== "false" ? getScoreSummary({ includeElements: false }) : null
         };
     }
 
@@ -393,7 +515,7 @@ MuseScore {
         if (!validation.valid) return validation;
 
         return executeWithUndo(function() {
-            var score = getScoreSummary();
+            var score = getScoreSummary({ includeElements: false });
             if (params.measure < 1 || params.measure > score.measures.length) {
                 return { error: "Invalid measure number" };
             }
@@ -615,7 +737,7 @@ MuseScore {
             });
 
             var currTick = cursor.tick;
-            var scoreSummary = getScoreSummary();
+            var scoreSummary = getScoreSummary({ includeElements: false });
 
             var measureIdx = scoreSummary.measures.filter(function(m) { 
                 return m.startTick <= currTick; 
@@ -947,6 +1069,26 @@ MuseScore {
         });
     }
 
+    // Remove whole measures (all staves). Runs MuseScore's own "Remove selected range"
+    // action, which manages its own undo step, so it is not wrapped in executeWithUndo.
+    function deleteMeasures(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange({ startMeasure: params.startMeasure, endMeasure: params.endMeasure });
+        if (!range.valid) return range;
+
+        selectMeasureRange(range);
+        cmd("time-delete");
+        curScore.selection.clear();
+        selectionState = { startStaff: 0, endStaff: 1, startTick: 0, elements: {} };
+
+        return {
+            success: true,
+            message: "Deleted measures " + range.startMeasure + "-" + range.endMeasure +
+                     "; later measures are renumbered. Cursor reset to the start of the score.",
+            numMeasures: curScore.nmeasures
+        };
+    }
+
     // ========================================
     // STAFF & INSTRUMENT OPERATIONS
     // ========================================
@@ -1012,9 +1154,16 @@ MuseScore {
         var validation = validateParams(params, ["bpm"]);
         if (!validation.valid) return validation;
         
+        var cursorParams = undefined;
+        if (params.measure !== undefined && params.measure !== null) {
+            var range = measureRange({ startMeasure: params.measure, startStaff: 0, endStaff: 1 });
+            if (!range.valid) return range;
+            cursorParams = { startTick: range.startTick, startStaff: 0 };
+        }
+
         return executeWithUndo(function() {
-            var cursor = createCursor();
-            
+            var cursor = createCursor(cursorParams);
+
             var tempo = newElement(Element.TEMPO_TEXT);
             tempo.tempo = params.bpm / 60.0;
             tempo.text = "♩ = " + params.bpm;
@@ -1026,96 +1175,508 @@ MuseScore {
     }
 
     // ========================================
+    // REPEATS & FORMATTING
+    // ========================================
+
+    function selectMeasuresAction(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+
+        selectMeasureRange(range);
+        return {
+            success: true,
+            message: "Selected measures " + range.startMeasure + "-" + range.endMeasure +
+                     ", staves " + range.startStaff + "-" + (range.endStaff - 1),
+            startTick: range.startTick,
+            endTick: range.endTick,
+            startStaff: range.startStaff,
+            endStaff: range.endStaff
+        };
+    }
+
+    // measure.repeatStart / repeatEnd are writable from plugins only in MuseScore 4.6+.
+    // On older versions the bars are selected so the user can apply the palette items.
+    function setRepeatBarlines(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange({ startMeasure: params.startMeasure, endMeasure: params.endMeasure });
+        if (!range.valid) return range;
+
+        var playCount = params.playCount || 2;
+        var clear = params.clear === true;
+        var label = "measures " + range.startMeasure + "-" + range.endMeasure;
+
+        if (typeof range.firstMeasure.repeatStart === "undefined") {
+            selectMeasureRange(range);
+            return {
+                success: false,
+                fallback: "manual",
+                message: "This MuseScore version does not let plugins set repeat barlines (needs MuseScore 4.6+). " +
+                         label + " are now selected: in the Repeats & jumps palette click the start repeat sign, " +
+                         "then the end repeat sign." +
+                         (playCount !== 2 ? " Then set the play count to " + playCount + " in the measure properties." : "")
+            };
+        }
+
+        return executeWithUndo(function() {
+            range.firstMeasure.repeatStart = !clear;
+            range.lastMeasure.repeatEnd = !clear;
+            range.lastMeasure.repeatCount = clear ? 2 : playCount;
+            return {
+                success: true,
+                message: clear
+                    ? "Repeat barlines removed from " + label
+                    : "Repeat barlines set around " + label + " (played " + playCount + " times)"
+            };
+        });
+    }
+
+    // Experimental: plugins have no dedicated volta API, so this builds the spanner by hand
+    // and adds it through Cursor.add. Falls back to selecting the bars for the palette.
+    function addVolta(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange({ startMeasure: params.startMeasure, endMeasure: params.endMeasure, startStaff: 0, endStaff: 1 });
+        if (!range.valid) return range;
+
+        var endings = params.endings && params.endings.length ? params.endings : [1];
+        var text = params.text || (endings.join(", ") + ".");
+        var label = "measures " + range.startMeasure + "-" + range.endMeasure;
+
+        var result = executeWithUndo(function() {
+            var volta = newElement(Element.VOLTA);
+            volta.spannerTick = fraction(range.startTick, 1920);
+            volta.spannerTicks = fraction(range.endTick - range.startTick, 1920);
+            volta.beginText = text;
+            try {
+                volta.volta_ending = endings;
+            } catch (e) {
+                console.log("Could not set volta endings: " + e.toString());
+            }
+
+            var cursor = curScore.newCursor();
+            cursor.staffIdx = 0;
+            cursor.voice = 0;
+            cursor.rewindToTick(range.startTick);
+            cursor.add(volta);
+            return { success: true };
+        });
+
+        selectMeasureRange(range);
+        if (result && result.error) {
+            return {
+                success: false,
+                fallback: "manual",
+                message: "Could not add the volta from the plugin (" + result.error + "). " + label +
+                         " are now selected: click the matching volta in the Repeats & jumps palette, then edit its text to '" + text + "'."
+            };
+        }
+        return {
+            success: true,
+            experimental: true,
+            message: "Volta '" + text + "' requested over " + label + ". This uses an experimental plugin route: " +
+                     "check the score. If no volta appears, press Ctrl+Z and, with the bars still selected, " +
+                     "click the volta in the Repeats & jumps palette."
+        };
+    }
+
+    function setColor(element, color) {
+        if (!element) return 0;
+        try {
+            element.color = color;
+            return 1;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    // Color a chord (notes, accidentals, dots, ties, stem, hook, beam) or a rest. Returns the number of notes/rests colored.
+    function paintElement(element, color) {
+        if (element.name === "Rest" || element.name === "MeasureRepeat") return setColor(element, color);
+        if (element.name !== "Chord") return 0;
+
+        var count = 0;
+        var notesObj = element.notes || {};
+        var keys = Object.keys(notesObj);
+        for (var k = 0; k < keys.length; k++) {
+            var note = notesObj[keys[k]];
+            count += setColor(note, color);
+            setColor(note.accidental, color);
+            setColor(note.tieForward, color);
+            var dots = note.dots || [];
+            for (var d = 0; d < dots.length; d++) {
+                setColor(dots[d], color);
+            }
+        }
+        setColor(element.stem, color);
+        setColor(element.hook, color);
+        setColor(element.beam, color);
+        return count;
+    }
+
+    function colorRange(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+        range = applyBeats(range, params);
+        if (range.error) return range;
+
+        var color = params.color || "#000000";
+        var voices = params.voices && params.voices.length ? params.voices : [0, 1, 2, 3];
+
+        return executeWithUndo(function() {
+            var count = 0;
+            var seg = range.firstMeasure.firstSegment;
+            while (seg && seg.tick < range.startTick) {
+                seg = seg.next;
+            }
+            while (seg && seg.tick < range.endTick) {
+                for (var s = range.startStaff; s < range.endStaff; s++) {
+                    for (var i = 0; i < voices.length; i++) {
+                        var el = seg.elementAt(s * 4 + voices[i]);
+                        if (el) count += paintElement(el, color);
+                    }
+                }
+                seg = seg.next;
+            }
+            return {
+                success: true,
+                colored: count,
+                message: "Colored " + count + " note(s)/rest(s) " + color + " in measures " +
+                         range.startMeasure + "-" + range.endMeasure +
+                         (params.startBeat || params.endBeat ? " (beats " + (params.startBeat || 1) + " to " + (params.endBeat || "end") + ")" : "") +
+                         ", staves " + range.startStaff + "-" + (range.endStaff - 1)
+            };
+        });
+    }
+
+    function setStyle(params) {
+        if (!curScore) return { error: "No score open" };
+        var validation = validateParams(params, ["key", "value"]);
+        if (!validation.valid) return validation;
+
+        return executeWithUndo(function() {
+            curScore.style.setValue(params.key, params.value);
+            return { success: true, message: "Style " + params.key + " set to " + params.value };
+        });
+    }
+
+    // Highlighter: a thick, semi-transparent text line drawn behind one staff's notes over a range of
+    // measures; it follows the bars across system breaks. Experimental: added through Cursor.add.
+    function addHighlight(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+        range = applyBeats(range, params);
+        if (range.error) return range;
+
+        var color = params.color || "#59FFE600";
+        var width = params.width !== undefined ? params.width : 3.0;      // spatium; a 5-line staff is 4 spaces
+        var offsetY = params.offsetY !== undefined ? params.offsetY : 2.0;
+
+        return executeWithUndo(function() {
+            for (var s = range.startStaff; s < range.endStaff; s++) {
+                var line = newElement(Element.TEXTLINE);
+                line.spannerTick = fraction(range.startTick, 1920);
+                line.spannerTicks = fraction(range.endTick - range.startTick, 1920);
+                line.spannerTrack2 = s * 4;
+                line.lineWidth = width;
+                line.lineColor = color;
+                line.autoplace = false;
+                line.offset = Qt.point(0, offsetY);
+                line.z = 1;
+
+                var cursor = curScore.newCursor();
+                cursor.staffIdx = s;
+                cursor.voice = 0;
+                cursor.rewindToTick(range.startTick);
+                cursor.add(line);
+            }
+            return {
+                success: true,
+                experimental: true,
+                added: range.endStaff - range.startStaff,
+                message: "Highlighted measures " + range.startMeasure + "-" + range.endMeasure +
+                         " on staves " + range.startStaff + "-" + (range.endStaff - 1)
+            };
+        });
+    }
+
+    // A staff text in a colored box, e.g. a section tag.
+    function addLabel(params) {
+        if (!curScore) return { error: "No score open" };
+        var validation = validateParams(params, ["measure", "text"]);
+        if (!validation.valid) return validation;
+        var staff = params.staff || 0;
+        var range = measureRange({ startMeasure: params.measure, startStaff: staff, endStaff: staff + 1 });
+        if (!range.valid) return range;
+
+        return executeWithUndo(function() {
+            var cursor = createCursor({ startTick: range.startTick, startStaff: staff });
+            var label = newElement(Element.STAFF_TEXT);
+            label.text = params.text;
+            label.frameType = 1;  // square frame
+            label.frameBgColor = params.background || "#FFF2A8";
+            label.frameFgColor = params.border || "#000000";
+            if (params.color) label.color = params.color;
+            cursor.add(label);
+            return { success: true, message: "Label '" + params.text + "' added at measure " + params.measure + ", staff " + staff };
+        });
+    }
+
+    function isHighlightLine(spanner) {
+        var color = spanner.lineColor;
+        return spanner.name === "TextLine" && spanner.autoplace === false && color && color.a !== undefined && color.a < 1;
+    }
+
+    // Remove highlights (addHighlight lines) and boxed labels (addLabel texts) in a range.
+    function clearHighlights(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+        var kinds = params.kinds && params.kinds.length ? params.kinds : ["highlights", "labels"];
+        var targets = [];
+
+        if (kinds.indexOf("highlights") !== -1) {
+            var spanners = curScore.spanners || [];
+            for (var i = 0; i < spanners.length; i++) {
+                var sp = spanners[i];
+                var tick = sp.spannerTick ? sp.spannerTick.ticks : -1;
+                var staffIdx = Math.floor(sp.track / 4);
+                if (tick >= range.startTick && tick < range.endTick &&
+                        staffIdx >= range.startStaff && staffIdx < range.endStaff && isHighlightLine(sp)) {
+                    targets.push(sp);
+                }
+            }
+        }
+        if (kinds.indexOf("labels") !== -1) {
+            var seg = range.firstMeasure.firstSegment;
+            while (seg && seg.tick < range.endTick) {
+                var annotations = seg.annotations || [];
+                for (var a = 0; a < annotations.length; a++) {
+                    var ann = annotations[a];
+                    var annStaff = Math.floor(ann.track / 4);
+                    if (ann.name === "StaffText" && ann.frameType && annStaff >= range.startStaff && annStaff < range.endStaff) {
+                        targets.push(ann);
+                    }
+                }
+                seg = seg.next;
+            }
+        }
+
+        if (targets.length === 0) return { success: true, removed: 0, message: "Nothing to remove" };
+        curScore.selection.clear();
+        for (var t = 0; t < targets.length; t++) {
+            curScore.selection.select(targets[t], true);
+        }
+        cmd("delete");
+        curScore.selection.clear();
+        return { success: true, removed: targets.length, message: "Removed " + targets.length + " highlight(s)/label(s)" };
+    }
+
+    // Experimental, like addVolta: rehearsal marks have no dedicated API, so they go through Cursor.add.
+    function addRehearsalMark(params) {
+        if (!curScore) return { error: "No score open" };
+        var validation = validateParams(params, ["measure", "text"]);
+        if (!validation.valid) return validation;
+        var range = measureRange({ startMeasure: params.measure, startStaff: 0, endStaff: 1 });
+        if (!range.valid) return range;
+
+        return executeWithUndo(function() {
+            var cursor = createCursor({ startTick: range.startTick, startStaff: 0 });
+            var mark = newElement(Element.REHEARSAL_MARK);
+            mark.text = params.text;
+            cursor.add(mark);
+            return { success: true, experimental: true, message: "Rehearsal mark '" + params.text + "' added at measure " + params.measure };
+        });
+    }
+
+    // ========================================
+    // SCORE FILES & PARTS
+    // ========================================
+
+    // staff index -> Part, from each part's track range (4 tracks per staff, endTrack exclusive)
+    function staffParts() {
+        var map = {};
+        var parts = curScore.parts || [];
+        for (var p = 0; p < parts.length; p++) {
+            var part = parts[p];
+            for (var s = Math.floor(part.startTrack / 4); s < Math.ceil(part.endTrack / 4); s++) {
+                map[s] = part;
+            }
+        }
+        return map;
+    }
+
+    function isDrumPart(part) {
+        if (part.hasDrumStaff) return true;
+        return (part.instrumentId || "").indexOf("drum.") === 0;
+    }
+
+    function scoreFileInfo() {
+        if (!curScore) return { error: "No score open" };
+        return {
+            success: true,
+            scoreName: curScore.scoreName || "",
+            title: curScore.title || "",
+            numMeasures: curScore.nmeasures,
+            numStaves: curScore.nstaves
+        };
+    }
+
+    function saveScore() {
+        if (!curScore) return { error: "No score open" };
+        cmd("file-save");
+        return { success: true, message: "Score saved" };
+    }
+
+    function openedScoreResult(opened, path) {
+        if (!opened || !curScore) return { error: "MuseScore could not open " + path };
+        selectionState = { startStaff: 0, endStaff: 1, startTick: 0, elements: {} };
+        return {
+            success: true,
+            path: path,
+            scoreName: curScore.scoreName || "",
+            numMeasures: curScore.nmeasures,
+            numStaves: curScore.nstaves
+        };
+    }
+
+    function openScore(params) {
+        var validation = validateParams(params, ["path"]);
+        if (!validation.valid) return validation;
+        return openedScoreResult(readScore(params.path), params.path);
+    }
+
+    // Close the current score and open the file again, to pick up edits made to it on disk.
+    // Save first: closing a modified score would show a dialog.
+    function reopenScore(params) {
+        if (!curScore) return { error: "No score open" };
+        var validation = validateParams(params, ["path"]);
+        if (!validation.valid) return validation;
+        closeScore(curScore);
+        return openedScoreResult(readScore(params.path), params.path);
+    }
+
+    // Remove every part that has none of the given staves (MuseScore 4.7+).
+    function removeParts(params) {
+        if (!curScore) return { error: "No score open" };
+        var validation = validateParams(params, ["keepStaves"]);
+        if (!validation.valid) return validation;
+        if (typeof curScore.removeParts !== "function") {
+            return { error: "This MuseScore version cannot remove instruments from a plugin (needs 4.7+). Remove them in the Instruments panel." };
+        }
+
+        var parts = curScore.parts;
+        var remove = [];
+        var kept = [];
+        for (var p = 0; p < parts.length; p++) {
+            var part = parts[p];
+            var keep = false;
+            for (var s = Math.floor(part.startTrack / 4); s < Math.ceil(part.endTrack / 4); s++) {
+                if (params.keepStaves.indexOf(s) !== -1) keep = true;
+            }
+            if (keep) kept.push(part.longName || part.partName || ""); else remove.push(part);
+        }
+        if (kept.length === 0) return { error: "None of the staves " + params.keepStaves.join(", ") + " exist" };
+
+        return executeWithUndo(function() {
+            curScore.removeParts(remove);
+            return { success: true, removed: remove.length, kept: kept, numStaves: curScore.nstaves };
+        });
+    }
+
+    // ========================================
     // SCORE ANALYSIS
     // ========================================
 
     function getScore(params) {
         if (!curScore) return { error: "No score open" };
-        
+
         try {
-            return { success: true, analysis: getScoreSummary() };
+            return { success: true, analysis: getScoreSummary(params) };
         } catch (e) {
             return { error: e.toString() };
         }
     }
 
-    function getScoreSummary() {
+    // opts: startMeasure / endMeasure (1-based, inclusive), staves (list of staff indices),
+    // includeElements (false returns only measure positions, which navigation uses).
+    function getScoreSummary(opts) {
         if (!curScore) return { error: "No score open" };
 
-        return executeWithUndo(function() {
-            var tempState = selectionState;
-            var score = {
-                title: curScore.metaTag("workTitle") || curScore.title || "",
-                numMeasures: curScore.nmeasures,
-                measures: [],
-                staves: []
-            };
-            
-            // Analyze staves
-            for (var i = 0; i < curScore.nstaves; i++) {
-                var staff = curScore.staves && curScore.staves[i] || 
-                           (typeof curScore.staff === "function" ? curScore.staff(i) : null);
-                
-                score.staves.push({
-                    name: `staff${i}`,
-                    shortName: staff ? staff.shortName : "",
-                    visible: staff ? !staff.invisible : true
-                });
+        opts = opts || {};
+        var total = curScore.nmeasures;
+        var first = Math.max(1, opts.startMeasure || 1);
+        var last = Math.min(total, opts.endMeasure || total);
+        var includeElements = opts.includeElements !== false;
+
+        var staffIndices = [];
+        if (opts.staves && opts.staves.length) {
+            for (var s = 0; s < opts.staves.length; s++) {
+                if (opts.staves[s] >= 0 && opts.staves[s] < curScore.nstaves) staffIndices.push(opts.staves[s]);
             }
+        } else {
+            for (var a = 0; a < curScore.nstaves; a++) staffIndices.push(a);
+        }
 
-            // Analyze measures
-            var cursor = createCursor({startTick: 0});
-            var measureBoundaries = [];
+        var score = {
+            title: curScore.metaTag("workTitle") || curScore.title || "",
+            numMeasures: total,
+            startMeasure: first,
+            endMeasure: last,
+            measures: [],
+            staves: []
+        };
 
-            // Get measure boundaries
-            for (var i = 0; i < curScore.nmeasures; i++) {
-                var measure = {
-                    measure: i + 1, 
-                    startTick: cursor.tick,
-                    numElements: 0, 
-                    elements: {}
-                };
+        var partOf = staffParts();
+        for (var i = 0; i < staffIndices.length; i++) {
+            var idx = staffIndices[i];
+            var staff = curScore.staves && curScore.staves[idx] ||
+                       (typeof curScore.staff === "function" ? curScore.staff(idx) : null);
+            var part = partOf[idx];
+            score.staves.push({
+                name: `staff${idx}`,
+                index: idx,
+                partName: part ? (part.longName || part.partName || "") : "",
+                shortName: part ? (part.shortName || "") : (staff ? staff.shortName : ""),
+                instrumentId: part ? (part.instrumentId || "") : "",
+                isDrums: part ? isDrumPart(part) : false,
+                visible: staff ? !staff.invisible : true
+            });
+        }
 
-                for (var j = 0; j < curScore.nstaves; j++) {
-                    measure.elements[`staff${j}`] = [];
+        var m = getMeasure(first);
+        for (var n = first; m && n <= last; n++, m = m.nextMeasure) {
+            var startTick = measureStartTick(m);
+            var endTick = measureEndTick(m);
+            var entry = { measure: n, startTick: startTick, durationTicks: endTick - startTick };
+
+            if (includeElements) {
+                entry.numElements = 0;
+                entry.elements = {};
+                for (var j = 0; j < staffIndices.length; j++) {
+                    entry.elements[`staff${staffIndices[j]}`] = [];
                 }
 
-                measureBoundaries.push(cursor.tick);
-                score.measures.push(measure);
-                cursor.nextMeasure();
-            }
-
-            // Process elements for each staff
-            for (var k = 0; k < curScore.nstaves; k++) {
-                cursor.rewind(0);
-                var currentSegment = cursor.segment;
-
-                while (currentSegment) {
-                    var measureIdx = measureBoundaries.filter(function(tick) {
-                        return tick <= currentSegment.tick;
-                    }).length - 1;
-
-                    for (var v = 0; v < 4; v++) {
-                        var track = k * 4 + v;
-                        var el = currentSegment.elementAt(track);
-                        if (el) {
-                            score.measures[measureIdx].numElements++;
-                            var processedElement = processElement(el);
-                            if (processedElement) {
-                                processedElement.startTick = currentSegment.tick;
-                                processedElement.voice = v;
-                                score.measures[measureIdx].elements[`staff${k}`].push(processedElement);
+                var seg = m.firstSegment;
+                while (seg && seg.tick < endTick) {
+                    for (var k = 0; k < staffIndices.length; k++) {
+                        for (var v = 0; v < 4; v++) {
+                            var processed = processElement(seg.elementAt(staffIndices[k] * 4 + v));
+                            if (processed) {
+                                processed.startTick = seg.tick;
+                                processed.voice = v;
+                                entry.elements[`staff${staffIndices[k]}`].push(processed);
+                                entry.numElements++;
                             }
                         }
                     }
-                    currentSegment = currentSegment.next;
+                    seg = seg.next;
                 }
             }
-
-            // Restore state
-            selectionState = tempState;
-            return score;
-        });
+            score.measures.push(entry);
+        }
+        return score;
     }
 
     // ========================================

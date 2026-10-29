@@ -25,6 +25,8 @@ SEQUENCE_ACTIONS = {
     "selectCurrentMeasure", "processSequence", "insertMeasure", "goToFinalMeasure",
     "goToBeginningOfScore", "setTimeSignature", "addLyrics", "addInstrument",
     "setStaffMute", "setInstrumentSound", "setTempo",
+    "selectMeasures", "setRepeatBarlines", "addVolta", "colorRange", "deleteMeasures",
+    "setStyle", "addRehearsalMark", "removeParts", "addHighlight", "addLabel", "clearHighlights",
 }
 
 TPC_BY_PITCH_CLASS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19]
@@ -42,37 +44,59 @@ class MockScore:
         self.num_measures = measures
         self.time_signature = (4, 4)
         self.tempo = 120
+        self.tempo_measure: Optional[int] = None
         self.elements: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(staves)}
         self.cursor_tick = 0
         self.cursor_staff = 0
+        # Repeat structure and formatting, as the plugin would leave them in the score
+        self.repeat_barlines_supported = True  # False mimics MuseScore < 4.6
+        self.repeats: Dict[int, Dict[str, Any]] = {}  # measure -> {"start", "end", "count"}
+        self.voltas: List[Dict[str, Any]] = []
+        self.colors: Dict[tuple, str] = {}  # (staff, startTick, voice) -> color
+        self.selected: Optional[Dict[str, int]] = None
+        self.part_names = [f"Part {i + 1}" for i in range(staves)]
+        self.drum_staves: set = set()
+        self.style: Dict[str, Any] = {}
+        self.rehearsal_marks: List[Dict[str, Any]] = []
+        self.highlights: List[Dict[str, Any]] = []  # {"staff", "startMeasure", "endMeasure", "color"}
+        self.labels: List[Dict[str, Any]] = []  # {"staff", "measure", "text", "background"}
+        self.score_name = title
 
     @property
     def measure_ticks(self) -> int:
         num, den = self.time_signature
         return WHOLE_NOTE_TICKS * num // den
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """getScore analysis; params mirror the plugin (startMeasure, endMeasure, staves, includeElements)."""
+        params = params or {}
+        first = max(1, params.get("startMeasure") or 1)
+        last = min(self.num_measures, params.get("endMeasure") or self.num_measures)
+        staves = [s for s in (params.get("staves") or range(self.num_staves)) if 0 <= s < self.num_staves]
         measures = []
-        for i in range(self.num_measures):
-            start = i * self.measure_ticks
+        for number in range(first, last + 1):
+            start = (number - 1) * self.measure_ticks
             end = start + self.measure_ticks
-            per_staff = {
-                f"staff{s}": [e for e in els if start <= e["startTick"] < end]
-                for s, els in self.elements.items()
-            }
-            measures.append({
-                "measure": i + 1,
-                "startTick": start,
-                "numElements": sum(len(v) for v in per_staff.values()),
-                "elements": per_staff,
-            })
+            entry = {"measure": number, "startTick": start, "durationTicks": self.measure_ticks}
+            if params.get("includeElements") is not False:
+                per_staff = {
+                    f"staff{s}": [e for e in self.elements[s] if start <= e["startTick"] < end]
+                    for s in staves
+                }
+                entry["numElements"] = sum(len(v) for v in per_staff.values())
+                entry["elements"] = per_staff
+            measures.append(entry)
         return {
             "title": self.title,
             "numMeasures": self.num_measures,
+            "startMeasure": first,
+            "endMeasure": last,
             "measures": measures,
             "staves": [
-                {"name": f"staff{i}", "shortName": "", "visible": True}
-                for i in range(self.num_staves)
+                {"name": f"staff{i}", "index": i, "partName": self.part_names[i], "shortName": "",
+                 "instrumentId": "drum.group" if i in self.drum_staves else "keyboard.piano",
+                 "isDrums": i in self.drum_staves, "visible": True}
+                for i in staves
             ],
         }
 
@@ -103,6 +127,7 @@ class MockMuseScore:
         self.history: List[MockScore] = []
         self.port: Optional[int] = None
         self.commands: List[Dict[str, Any]] = []
+        self.opened: List[str] = []  # paths opened through openScore / reopenScore
 
     @property
     def uri(self) -> str:
@@ -157,19 +182,58 @@ class MockMuseScore:
             start, start + element["durationTicks"], self.score.cursor_staff, self.score.cursor_staff + 1
         )
 
+    def _range(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Mirror of the plugin's measureRange(): validated measure and staff range, or an error."""
+        if (err := self._missing(params, ["startMeasure"])):
+            return err
+        first = params["startMeasure"]
+        last = params.get("endMeasure") or first
+        if first < 1 or last > self.score.num_measures or last < first:
+            return {"error": f"Invalid measure range {first}-{last} (score has {self.score.num_measures} measures)"}
+        start_staff = params.get("startStaff") or 0
+        end_staff = params.get("endStaff")
+        if end_staff is None:
+            end_staff = self.score.num_staves
+        if start_staff < 0 or end_staff > self.score.num_staves or start_staff >= end_staff:
+            return {"error": f"Invalid staff range {start_staff}-{end_staff}"}
+        ticks = self.score.measure_ticks
+        return {
+            "valid": True, "startMeasure": first, "endMeasure": last,
+            "startTick": (first - 1) * ticks, "endTick": last * ticks,
+            "startStaff": start_staff, "endStaff": end_staff,
+        }
+
+    def _apply_beats(self, rng: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        """Mirror of the plugin's applyBeats(): narrow the range to startBeat / endBeat (inclusive)."""
+        beat = WHOLE_NOTE_TICKS // self.score.time_signature[1]
+        measure = self.score.measure_ticks
+        if params.get("startBeat") is not None:
+            offset = round((params["startBeat"] - 1) * beat)
+            if params["startBeat"] < 1 or offset >= measure:
+                return {"error": f"Beat {params['startBeat']} is outside measure {rng['startMeasure']}"}
+            rng["startTick"] += offset
+        if params.get("endBeat") is not None:
+            end = (rng["endMeasure"] - 1) * measure + round(params["endBeat"] * beat)
+            if params["endBeat"] < 1 or end > rng["endTick"]:
+                return {"error": f"Beat {params['endBeat']} is outside measure {rng['endMeasure']}"}
+            rng["endTick"] = end
+        if rng["startTick"] >= rng["endTick"]:
+            return {"error": "The beat range is empty"}
+        return rng
+
     # --- actions -------------------------------------------------------
 
     def _do_ping(self, params):
         return "pong"
 
     def _do_getScore(self, params):
-        return {"success": True, "analysis": self.score.summary()}
+        return {"success": True, "analysis": self.score.summary(params)}
 
     def _do_getCursorInfo(self, params):
         return {
             "success": True,
             "currentSelection": self.score.cursor_selection(),
-            "currentScore": self.score.summary(),
+            "currentScore": self.score.summary({"includeElements": False}),
         }
 
     def _do_goToBeginningOfScore(self, params):
@@ -179,7 +243,7 @@ class MockMuseScore:
             "success": True,
             "message": "Initialized at 0",
             "currentSelection": self.score.cursor_selection(),
-            "currentScore": self.score.summary(),
+            "currentScore": self.score.summary({"includeElements": False}),
         }
 
     def _do_goToMeasure(self, params):
@@ -314,9 +378,200 @@ class MockMuseScore:
     def _do_setTempo(self, params):
         if (err := self._missing(params, ["bpm"])):
             return err
+        if params.get("measure") is not None:
+            rng = self._range({"startMeasure": params["measure"]})
+            if "error" in rng:
+                return rng
         self._mutating()
         self.score.tempo = params["bpm"]
+        self.score.tempo_measure = params.get("measure")
         return {"success": True, "message": f"Tempo set to {params['bpm']} BPM"}
+
+    def _do_selectMeasures(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        self.score.selected = {k: rng[k] for k in ("startMeasure", "endMeasure", "startStaff", "endStaff")}
+        return {"success": True, "message": f"Selected measures {rng['startMeasure']}-{rng['endMeasure']}",
+                **{k: rng[k] for k in ("startTick", "endTick", "startStaff", "endStaff")}}
+
+    def _do_setRepeatBarlines(self, params):
+        rng = self._range({"startMeasure": params.get("startMeasure"), "endMeasure": params.get("endMeasure")})
+        if "error" in rng:
+            return rng
+        if not self.score.repeat_barlines_supported:
+            self._do_selectMeasures(rng)
+            return {"success": False, "fallback": "manual",
+                    "message": "This MuseScore version does not let plugins set repeat barlines (needs MuseScore 4.6+)."}
+        self._mutating()
+        first, last = rng["startMeasure"], rng["endMeasure"]
+        clear = params.get("clear") is True
+        self.score.repeats.setdefault(first, {})["start"] = not clear
+        self.score.repeats.setdefault(last, {})["end"] = not clear
+        self.score.repeats[last]["count"] = 2 if clear else params.get("playCount") or 2
+        return {"success": True, "message": f"Repeat barlines set around measures {first}-{last}"}
+
+    def _do_addVolta(self, params):
+        rng = self._range({"startMeasure": params.get("startMeasure"), "endMeasure": params.get("endMeasure")})
+        if "error" in rng:
+            return rng
+        self._mutating()
+        endings = params.get("endings") or [1]
+        self.score.voltas.append({
+            "startMeasure": rng["startMeasure"], "endMeasure": rng["endMeasure"], "endings": endings,
+            "text": params.get("text") or ", ".join(str(e) for e in endings) + ".",
+        })
+        return {"success": True, "experimental": True, "message": "Volta requested"}
+
+    def _do_colorRange(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        rng = self._apply_beats(rng, params)
+        if "error" in rng:
+            return rng
+        self._mutating()
+        color = params.get("color") or "#000000"
+        voices = params.get("voices") or [0, 1, 2, 3]
+        count = 0
+        for staff in range(rng["startStaff"], rng["endStaff"]):
+            for e in self.score.elements[staff]:
+                if rng["startTick"] <= e["startTick"] < rng["endTick"] and e.get("voice", 0) in voices:
+                    self.score.colors[(staff, e["startTick"], e.get("voice", 0))] = color
+                    count += len(e.get("notes", [])) if e["name"] == "Chord" else 1
+        return {"success": True, "colored": count, "message": f"Colored {count} note(s)/rest(s) {color}"}
+
+    def _do_deleteMeasures(self, params):
+        rng = self._range({"startMeasure": params.get("startMeasure"), "endMeasure": params.get("endMeasure")})
+        if "error" in rng:
+            return rng
+        self._mutating()
+        score = self.score
+        start, end = rng["startTick"], rng["endTick"]
+        removed_ticks = end - start
+        removed_bars = rng["endMeasure"] - rng["startMeasure"] + 1
+
+        def shift(tick):
+            return tick - removed_ticks if tick >= end else tick
+
+        for staff, elements in score.elements.items():
+            kept = [e for e in elements if not start <= e["startTick"] < end]
+            for e in kept:
+                e["startTick"] = shift(e["startTick"])
+            score.elements[staff] = kept
+        score.colors = {
+            (st, shift(t), v): c for (st, t, v), c in score.colors.items() if not start <= t < end
+        }
+
+        def renumber(m):
+            return m - removed_bars if m > rng["endMeasure"] else m
+
+        score.repeats = {
+            renumber(m): r for m, r in score.repeats.items()
+            if not rng["startMeasure"] <= m <= rng["endMeasure"]
+        }
+        score.voltas = [
+            {**v, "startMeasure": renumber(v["startMeasure"]), "endMeasure": renumber(v["endMeasure"])}
+            for v in score.voltas
+            if v["endMeasure"] < rng["startMeasure"] or v["startMeasure"] > rng["endMeasure"]
+        ]
+        score.num_measures -= removed_bars
+        score.cursor_tick, score.cursor_staff = 0, 0
+        return {"success": True, "message": f"Deleted measures {rng['startMeasure']}-{rng['endMeasure']}",
+                "numMeasures": score.num_measures}
+
+    def _do_setStyle(self, params):
+        if (err := self._missing(params, ["key", "value"])):
+            return err
+        self._mutating()
+        self.score.style[params["key"]] = params["value"]
+        return {"success": True}
+
+    def _do_addRehearsalMark(self, params):
+        if (err := self._missing(params, ["measure", "text"])):
+            return err
+        rng = self._range({"startMeasure": params["measure"]})
+        if "error" in rng:
+            return rng
+        self._mutating()
+        self.score.rehearsal_marks.append({"measure": params["measure"], "text": params["text"]})
+        return {"success": True, "experimental": True}
+
+    def _do_addHighlight(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        rng = self._apply_beats(rng, params)
+        if "error" in rng:
+            return rng
+        self._mutating()
+        for staff in range(rng["startStaff"], rng["endStaff"]):
+            self.score.highlights.append({"staff": staff, "startMeasure": rng["startMeasure"],
+                                          "endMeasure": rng["endMeasure"], "color": params.get("color")})
+        return {"success": True, "experimental": True, "added": rng["endStaff"] - rng["startStaff"]}
+
+    def _do_addLabel(self, params):
+        if (err := self._missing(params, ["measure", "text"])):
+            return err
+        staff = params.get("staff") or 0
+        rng = self._range({"startMeasure": params["measure"], "startStaff": staff, "endStaff": staff + 1})
+        if "error" in rng:
+            return rng
+        self._mutating()
+        self.score.labels.append({"staff": staff, "measure": params["measure"], "text": params["text"],
+                                  "background": params.get("background")})
+        return {"success": True}
+
+    def _do_clearHighlights(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        kinds = params.get("kinds") or ["highlights", "labels"]
+
+        def inside(staff, measure):
+            return (rng["startStaff"] <= staff < rng["endStaff"]
+                    and rng["startMeasure"] <= measure <= rng["endMeasure"])
+
+        before = len(self.score.highlights) + len(self.score.labels)
+        self._mutating()
+        if "highlights" in kinds:
+            self.score.highlights = [h for h in self.score.highlights if not inside(h["staff"], h["startMeasure"])]
+        if "labels" in kinds:
+            self.score.labels = [l for l in self.score.labels if not inside(l["staff"], l["measure"])]
+        removed = before - len(self.score.highlights) - len(self.score.labels)
+        return {"success": True, "removed": removed}
+
+    def _do_scoreFileInfo(self, params):
+        return {"success": True, "scoreName": self.score.score_name, "title": self.score.title,
+                "numMeasures": self.score.num_measures, "numStaves": self.score.num_staves}
+
+    def _do_saveScore(self, params):
+        return {"success": True, "message": "Score saved"}
+
+    def _do_openScore(self, params):
+        if (err := self._missing(params, ["path"])):
+            return err
+        self.opened.append(params["path"])
+        return {"success": True, "path": params["path"], "scoreName": self.score.score_name}
+
+    def _do_reopenScore(self, params):
+        return self._do_openScore(params)
+
+    def _do_removeParts(self, params):
+        if (err := self._missing(params, ["keepStaves"])):
+            return err
+        keep = [s for s in range(self.score.num_staves) if s in params["keepStaves"]]
+        if not keep:
+            return {"error": "None of the staves exist"}
+        self._mutating()
+        score = self.score
+        removed = score.num_staves - len(keep)
+        score.elements = {new: score.elements[old] for new, old in enumerate(keep)}
+        score.part_names = [score.part_names[s] for s in keep]
+        score.drum_staves = {new for new, old in enumerate(keep) if old in score.drum_staves}
+        score.num_staves = len(keep)
+        return {"success": True, "removed": removed, "kept": score.part_names,
+                "numStaves": score.num_staves}
 
     def _do_undo(self, params):
         if self.history:

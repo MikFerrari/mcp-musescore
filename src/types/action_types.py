@@ -159,6 +159,148 @@ class prevStaffAction(TypedDict):
     params: Dict[str, Any]
 
 
+class setTempoParams(TypedDict):
+    bpm: float
+    measure: NotRequired[int]
+
+
+class setTempoAction(TypedDict):
+    action: Literal["setTempo"]
+    params: setTempoParams
+
+
+class measureRangeParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+
+
+class selectMeasuresAction(TypedDict):
+    action: Literal["selectMeasures"]
+    params: measureRangeParams
+
+
+class deleteMeasuresParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+
+
+class deleteMeasuresAction(TypedDict):
+    action: Literal["deleteMeasures"]
+    params: deleteMeasuresParams
+
+
+class setRepeatBarlinesParams(TypedDict):
+    startMeasure: int
+    endMeasure: int
+    playCount: NotRequired[int]
+    clear: NotRequired[bool]
+
+
+class setRepeatBarlinesAction(TypedDict):
+    action: Literal["setRepeatBarlines"]
+    params: setRepeatBarlinesParams
+
+
+class addVoltaParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    endings: NotRequired[List[int]]
+    text: NotRequired[str]
+
+
+class addVoltaAction(TypedDict):
+    action: Literal["addVolta"]
+    params: addVoltaParams
+
+
+class colorRangeParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+    startBeat: NotRequired[float]
+    endBeat: NotRequired[float]
+    color: str
+    voices: NotRequired[List[int]]
+
+
+class colorRangeAction(TypedDict):
+    action: Literal["colorRange"]
+    params: colorRangeParams
+
+
+class setStyleParams(TypedDict):
+    key: str
+    value: Any
+
+
+class setStyleAction(TypedDict):
+    action: Literal["setStyle"]
+    params: setStyleParams
+
+
+class addRehearsalMarkParams(TypedDict):
+    measure: int
+    text: str
+
+
+class addRehearsalMarkAction(TypedDict):
+    action: Literal["addRehearsalMark"]
+    params: addRehearsalMarkParams
+
+
+class removePartsParams(TypedDict):
+    keepStaves: List[int]
+
+
+class removePartsAction(TypedDict):
+    action: Literal["removeParts"]
+    params: removePartsParams
+
+
+class addHighlightParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+    startBeat: NotRequired[float]
+    endBeat: NotRequired[float]
+    color: NotRequired[str]
+
+
+class addHighlightAction(TypedDict):
+    action: Literal["addHighlight"]
+    params: addHighlightParams
+
+
+class addLabelParams(TypedDict):
+    measure: int
+    text: str
+    staff: NotRequired[int]
+    background: NotRequired[str]
+    border: NotRequired[str]
+
+
+class addLabelAction(TypedDict):
+    action: Literal["addLabel"]
+    params: addLabelParams
+
+
+class clearHighlightsParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+    kinds: NotRequired[List[Literal["highlights", "labels"]]]
+
+
+class clearHighlightsAction(TypedDict):
+    action: Literal["clearHighlights"]
+    params: clearHighlightsParams
+
+
 ActionSequence = List[
     getScoreAction | addNoteAction | addRestAction | addTupletAction | 
     addLyricsAction | addInstrumentAction | setStaffMuteAction | 
@@ -166,5 +308,8 @@ ActionSequence = List[
     getCursorInfoAction | goToMeasureAction | nextElementAction | 
     prevElementAction | selectCurrentMeasureAction | insertMeasureAction | 
     goToFinalMeasureAction | goToBeginningOfScoreAction | setTimeSignatureAction | 
-    undoAction | nextStaffAction | prevStaffAction
+    undoAction | nextStaffAction | prevStaffAction | setTempoAction |
+    selectMeasuresAction | deleteMeasuresAction | setRepeatBarlinesAction |
+    addVoltaAction | colorRangeAction | setStyleAction | addRehearsalMarkAction |
+    removePartsAction | addHighlightAction | addLabelAction | clearHighlightsAction
 ]

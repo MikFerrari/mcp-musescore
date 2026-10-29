@@ -134,7 +134,7 @@ python tests/mock_musescore.py --demo
 fastmcp dev inspector server.py
 ```
 
-It implements a subset of the plugin's actions (ping, getScore, getCursorInfo, addNote, addRest, addLyrics, goToMeasure, appendMeasure, setTimeSignature, setTempo, addInstrument, undo, processSequence). `tests/test_integration.py` uses it to exercise the real tools and WebSocket client.
+It implements a subset of the plugin's actions (ping, getScore, getCursorInfo, addNote, addRest, addLyrics, goToMeasure, appendMeasure, setTimeSignature, setTempo, addInstrument, undo, processSequence, selectMeasures, deleteMeasures, setRepeatBarlines, addVolta, colorRange). `tests/test_integration.py` uses it to exercise the real tools and WebSocket client.
 
 ### Viewing Console Output
 
@@ -184,6 +184,7 @@ This MCP server provides comprehensive MuseScore control.
 - `insert_measure()` - Insert measure at current position
 - `append_measure(count)` - Add measures to end of score
 - `delete_selection(measure)` - Delete current selection or specific measure
+- `delete_measures(start_measure, end_measure)` - Remove whole measures on every staff (later measures are renumbered)
 
 ### **Lyrics & Text**
 - `add_lyrics_to_current_note(text)` - Add lyrics to current note
@@ -191,7 +192,7 @@ This MCP server provides comprehensive MuseScore control.
 - `set_title(title)` - Set score title
 
 ### **Score Information**
-- `get_score()` - Get complete score analysis and structure
+- `get_score(start_measure, end_measure, staves, format)` - Read the score as LilyPond (or JSON), 16 measures at a time by default, optionally only some staves
 - `show_score(first_measure, last_measure)` - Render the score as sheet music in an interactive viewer (see below)
 - `ping_musescore()` - Test connection to MuseScore
 - `connect_to_musescore()` - Establish WebSocket connection
@@ -199,7 +200,30 @@ This MCP server provides comprehensive MuseScore control.
 ### **Utilities**
 - `undo()` - Undo last action
 - `set_time_signature(numerator, denominator)` - Change time signature
+- `set_tempo(bpm, measure)` - Add a tempo marking at the cursor or at a measure
 - `processSequence(sequence)` - Execute multiple commands in batch
+
+### **Repeat Structure & Coloring**
+- `find_repeated_measures(start_measure, end_measure, staves, highlight)` - Find bars that repeat on each staff (measure-repeat candidates) and passages that repeat on all staves (repeat barline and 1st/2nd ending candidates), with the tool calls that apply them. `highlight=True` colors the duplicates
+- `set_repeat_barlines(start_measure, end_measure, play_count, clear)` - Start/end repeat barlines (MuseScore 4.6+; older versions get the bars selected for the palette)
+- `add_volta(start_measure, end_measure, endings, text)` - 1st/2nd ending bracket (experimental)
+- `prepare_measure_repeat(start_measure, end_measure, bars, first_staff, last_staff)` - Select bars for a 1/2/4-bar measure-repeat sign, which you then click in the palette (the manual alternative to `apply_measure_repeats`)
+- `color_range(...)` / `clear_color(...)` - Color notes and rests in a range of measures and staves, or reset them to black. `start_beat`/`end_beat` limit it to part of a bar (e.g. a fill on beats 3-4)
+- `highlight_bars(start_measure, end_measure, first_staff, last_staff, color, opacity, start_beat, end_beat)` - Highlighter-pen band behind the bars of each staff (a thick semi-transparent line that follows the bars across line breaks; experimental)
+- `add_label(measure, text, staff, background, border)` - Label in a colored box at a measure, e.g. "Groove x7"
+- `clear_highlights(start_measure, end_measure, first_staff, last_staff, kinds)` - Remove highlight bands and boxed labels
+
+### **Drum Charts & Measure-Repeat Signs**
+- `find_groove_sections(staves, start_measure, end_measure, tolerance)` - Section map of a groove part (drums by default): groove bar, exact copies, near copies with the hits that differ, and fills, plus ready-made repeat-sign groups for the exact copies
+- `apply_measure_repeats(staff, groups, score_path)` - Turn bars into 1-, 2- or 4-bar measure-repeat signs automatically (see below)
+- `restore_backup(backup, score_path)` - Bring back the version before an `apply_measure_repeats` edit
+- `collapse_to_repeat(start, end, force)` - Keep one groove bar between repeat barlines with a play count ("7x") and delete the bars it replaces (MuseScore 4.6+)
+- `make_part_score(staves, output_path)` - Save a copy of the score with only some parts (e.g. the drum kit) and open it, to build a chart in (MuseScore 4.7+)
+- `add_rehearsal_mark(measure, text)` - Section label at a measure (experimental)
+
+MuseScore's plugin API cannot place measure-repeat signs, so `apply_measure_repeats` edits the score file: the plugin saves the score, the server backs up the file (to `~/.mcp-musescore/backups`, or `MCP_MUSESCORE_BACKUP_DIR`), writes the signs into it, and the plugin closes and reopens the score. The tab shows the result, but MuseScore's undo history starts over, so use `restore_backup` to undo. The server finds the file through MuseScore's open and recent file lists; pass `score_path` if it cannot.
+
+To shorten a score, ask for its repeated passages to be applied: the agent runs `find_repeated_measures`, then each passage's `apply` steps (delete the duplicate measures, add repeat barlines and voltas), starting from the last passage.
 
 ### Score viewer (MCP Apps)
 
@@ -318,9 +342,14 @@ mcp-agents-demo/
     │   ├── sequences.py                # Batch operation tools
     │   ├── staff_instruments.py        # Staff and instrument tools
     │   ├── time_tempo.py               # Timing and tempo tools
+    │   ├── structure.py                # Repeat detection, repeat barlines, voltas
+    │   ├── formatting.py               # Score coloring tools
     │   └── viewer.py                   # show_score MCP App tool
     ├── ui/
     │   └── score_viewer.html           # VexFlow notation viewer
+    ├── utils/
+    │   ├── lilypond_converter.py       # Score JSON to LilyPond
+    │   └── repetition.py               # Repeated-measure analysis
     └── types/                          # Type definitions
         ├── __init__.py
         └── action_types.py             # WebSocket action type definitions
