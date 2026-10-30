@@ -36,6 +36,30 @@ START_BEAT_HELP = (
 END_BEAT_HELP = "Last beat in end_measure to include, the whole beat (e.g. 4 = through the end of beat 4). Defaults to the end of the measure."
 
 
+# Drum names accepted by highlight_notes, as General MIDI percussion pitches
+DRUM_PITCHES = {
+    "kick": [35, 36], "snare": [38, 40], "side stick": [37], "clap": [39],
+    "hi-hat": [42, 44, 46], "closed hi-hat": [42], "pedal hi-hat": [44], "open hi-hat": [46],
+    "crash": [49, 57], "ride": [51, 59], "ride bell": [53], "china": [52], "splash": [55],
+    "tom": [41, 43, 45, 47, 48, 50], "low tom": [41, 43], "mid tom": [45, 47], "high tom": [48, 50],
+    "tambourine": [54], "cowbell": [56],
+}
+
+
+def drum_pitches(names: List[str]) -> List[int]:
+    pitches = []
+    for name in names:
+        key = name.strip().lower().replace("hihat", "hi-hat").replace("hi hat", "hi-hat")
+        for singular in (key, key[:-2] if key.endswith("es") else key, key[:-1] if key.endswith("s") else key):
+            if singular in DRUM_PITCHES:
+                key = singular
+                break
+        if key not in DRUM_PITCHES:
+            raise ToolError(f"Unknown drum {name!r}; use one of {', '.join(sorted(DRUM_PITCHES))} or pass pitches")
+        pitches += DRUM_PITCHES[key]
+    return pitches
+
+
 def translucent(color: str, opacity: float) -> str:
     """"#rrggbb" plus an opacity (0-1) as Qt's "#aarrggbb"."""
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
@@ -113,6 +137,94 @@ def setup_formatting_tools(mcp, client: MuseScoreClient):
 
     @mcp.tool(
         description=(
+            "Highlight individual hits like a highlighter pen: a translucent box around each matching note, as wide "
+            "as the note and as tall as the whole staff (taller if the note sits above or below it). Hits close "
+            "enough for their boxes to touch share one box. Use drums (e.g. [\"crash\"]) or pitches to pick notes "
+            "in a chord. start_beat/end_beat limit it to part of a bar. Boxes are sized to the current layout: if "
+            "the layout changes a lot, clear and highlight again. Remove with clear_highlights."
+        ),
+        tags={"formatting"},
+    )
+    async def highlight_notes(
+        start_measure: Annotated[int, "First measure (1-based)"],
+        end_measure: Annotated[Optional[int], "Last measure (1-based, inclusive). Defaults to start_measure."] = None,
+        first_staff: Annotated[int, "First staff (0-based)"] = 0,
+        last_staff: Annotated[Optional[int], "Last staff (0-based, inclusive). Defaults to first_staff."] = None,
+        drums: Annotated[Optional[List[str]], 'Drum kit pieces to mark, e.g. ["crash"], ["kick", "snare"], ["hi-hat"]'] = None,
+        pitches: Annotated[Optional[List[int]], "MIDI pitches to mark (e.g. 57 for crash 2). Combined with drums; all notes if both are empty."] = None,
+        start_beat: Annotated[Optional[float], START_BEAT_HELP] = None,
+        end_beat: Annotated[Optional[float], END_BEAT_HELP] = None,
+        color: Annotated[str, 'Highlight color as "#rrggbb" (default yellow)'] = "#ffd600",
+        opacity: Annotated[float, "Opacity from 0 to 1"] = 0.45,
+    ):
+        params = beat_params(range_params(start_measure, end_measure, first_staff,
+                                          last_staff if last_staff is not None else first_staff), start_beat, end_beat)
+        selected = (pitches or []) + drum_pitches(drums or [])
+        if selected:
+            params["pitches"] = sorted(set(selected))
+        params["color"] = translucent(color, opacity)
+        return await client.request("highlightNotes", params)
+
+    @mcp.tool(
+        description=(
+            "Highlight or recolor time signatures, repeat barlines (start/end repeat signs with their dots) and "
+            "measure-repeat signs. mode='highlight' draws a full-staff-height translucent box around each one "
+            "(pastel light blue by default); mode='color' recolors the symbol itself (clear=True resets it to black)."
+        ),
+        tags={"formatting"},
+    )
+    async def highlight_symbols(
+        start_measure: Annotated[int, "First measure (1-based)"] = 1,
+        end_measure: Annotated[Optional[int], "Last measure (1-based, inclusive). Defaults to the end of the score."] = None,
+        first_staff: Annotated[int, "First staff (0-based)"] = 0,
+        last_staff: Annotated[Optional[int], "Last staff (0-based, inclusive). Defaults to the last staff."] = None,
+        kinds: Annotated[
+            List[Literal["time_signatures", "repeat_barlines", "measure_repeats"]], "Which symbols"
+        ] = ["time_signatures", "repeat_barlines", "measure_repeats"],
+        mode: Annotated[Literal["highlight", "color"], "Box behind the symbol, or recolor the symbol itself"] = "highlight",
+        color: Annotated[str, 'Color as "#rrggbb" (default pastel light blue)'] = "#a7d8f0",
+        opacity: Annotated[float, "Box opacity from 0 to 1 (highlight mode)"] = 0.6,
+        clear: Annotated[bool, "Color mode only: reset the symbols to black"] = False,
+    ):
+        if end_measure is None:
+            end_measure = (await client.request("scoreFileInfo"))["numMeasures"]
+        params = range_params(start_measure, end_measure, first_staff, last_staff)
+        params.update({"kinds": kinds, "mode": mode, "clear": clear})
+        if mode == "highlight":
+            params["color"] = translucent(color, opacity)
+        else:
+            translucent(color, 1)  # validates the color
+            params["color"] = color
+        return await client.request("highlightSymbols", params)
+
+    @mcp.tool(
+        description=(
+            "Highlight markings such as dynamics (f, mf, ff) with a translucent box behind each one. get_score "
+            "lists the markings in each measure. Remove with clear_highlights."
+        ),
+        tags={"formatting"},
+    )
+    async def highlight_markings(
+        start_measure: Annotated[int, "First measure (1-based)"] = 1,
+        end_measure: Annotated[Optional[int], "Last measure (1-based, inclusive). Defaults to the end of the score."] = None,
+        first_staff: Annotated[int, "First staff (0-based)"] = 0,
+        last_staff: Annotated[Optional[int], "Last staff (0-based, inclusive). Defaults to the last staff."] = None,
+        types: Annotated[
+            List[Literal["Dynamic", "StaffText", "SystemText", "Tempo", "Expression"]],
+            "Kinds of markings to highlight",
+        ] = ["Dynamic"],
+        color: Annotated[str, 'Highlight color as "#rrggbb" (default yellow)'] = "#ffd600",
+        opacity: Annotated[float, "Opacity from 0 to 1"] = 0.55,
+    ):
+        if end_measure is None:
+            end_measure = (await client.request("scoreFileInfo"))["numMeasures"]
+        params = range_params(start_measure, end_measure, first_staff, last_staff)
+        params["types"] = types
+        params["color"] = translucent(color, opacity)
+        return await client.request("highlightMarkings", params)
+
+    @mcp.tool(
+        description=(
             "Add a label in a colored box (a boxed staff text) at the start of a measure, e.g. a section tag like "
             "'Groove x7' or 'Fill'. Saved in the score; remove with clear_highlights."
         ),
@@ -134,8 +246,10 @@ def setup_formatting_tools(mcp, client: MuseScoreClient):
 
     @mcp.tool(
         description=(
-            "Remove highlights (highlight_bars) and boxed labels (add_label) from a range of measures and staves. "
-            "Note colors from color_range are reset with clear_color instead."
+            "Remove highlights from a range of measures and staves. kinds: 'highlights' = bands and boxes from "
+            "highlight_bars, highlight_notes and highlight_symbols; 'markings' = boxes behind dynamics "
+            "(highlight_markings); 'labels' = boxed labels (add_label); 'notes' = small notehead boxes made by older "
+            "versions. Recolored notes and symbols are reset with clear_color / highlight_symbols(mode='color', clear=True)."
         ),
         tags={"formatting"},
     )
@@ -145,8 +259,9 @@ def setup_formatting_tools(mcp, client: MuseScoreClient):
         first_staff: Annotated[int, "First staff (0-based)"] = 0,
         last_staff: Annotated[Optional[int], "Last staff (0-based, inclusive). Defaults to the last staff."] = None,
         kinds: Annotated[
-            List[Literal["highlights", "labels"]], "What to remove: highlight bands, boxed labels, or both"
-        ] = ["highlights", "labels"],
+            List[Literal["highlights", "notes", "markings", "labels"]],
+            "What to remove: highlight bands, note boxes, marking boxes, boxed labels",
+        ] = ["highlights", "notes", "markings", "labels"],
     ):
         if end_measure is None:
             end_measure = (await client.request("scoreFileInfo"))["numMeasures"]

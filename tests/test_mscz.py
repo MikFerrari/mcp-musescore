@@ -1,6 +1,5 @@
 """Tests for writing measure-repeat signs into score files (src/mscz)."""
 
-import glob
 import os
 import shutil
 import subprocess
@@ -9,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from dev.plugin_harness import find_musescore
 from src.mscz import ScoreFile, apply_measure_repeats
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "jazz piano" / "Jazz Piano.mscz"
@@ -168,13 +168,6 @@ def test_mscz_keeps_other_entries(tmp_path):
                 assert original.read(name) == edited.read(name), name
     measure = ScoreFile(path).staves()[1].findall("Measure")[1]
     assert measure.findtext("voice/MeasureRepeat/duration") == "3/4"
-
-
-def find_musescore():
-    candidates = [os.environ.get("MUSESCORE_BIN", "")]
-    candidates += sorted(glob.glob(os.path.expanduser("~/.local/bin/MuseScore*.AppImage")))
-    candidates += [shutil.which(n) or "" for n in ("mscore4portable", "mscore4", "mscore", "musescore")]
-    return next((c for c in candidates if c and os.access(c, os.X_OK)), None)
 
 
 @pytest.mark.skipif(find_musescore() is None, reason="MuseScore not installed")

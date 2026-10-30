@@ -134,7 +134,14 @@ python tests/mock_musescore.py --demo
 fastmcp dev inspector server.py
 ```
 
-It implements a subset of the plugin's actions (ping, getScore, getCursorInfo, addNote, addRest, addLyrics, goToMeasure, appendMeasure, setTimeSignature, setTempo, addInstrument, undo, processSequence, selectMeasures, deleteMeasures, setRepeatBarlines, addVolta, colorRange). `tests/test_integration.py` uses it to exercise the real tools and WebSocket client.
+For changes to the plugin itself, `dev/plugin_harness.py` runs the real plugin headless in a local MuseScore on a copy of a score, prints each command's result, and can save or render the edited score:
+
+```bash
+python dev/plugin_harness.py '[{"action": "highlightNotes", "params": {"startMeasure": 1, "endMeasure": 2}}]' \
+    "examples/jazz piano/Jazz Piano.mscz" --png /tmp/preview.png
+```
+
+The mock implements a subset of the plugin's actions (ping, getScore, getCursorInfo, addNote, addRest, addLyrics, goToMeasure, appendMeasure, setTimeSignature, setTempo, addInstrument, undo, processSequence, selectMeasures, deleteMeasures, setRepeatBarlines, addVolta, colorRange, the highlight and label actions, and the score-file actions used by `apply_measure_repeats` and `make_part_score`). `tests/test_integration.py` uses it to exercise the real tools and WebSocket client.
 
 ### Viewing Console Output
 
@@ -210,8 +217,11 @@ This MCP server provides comprehensive MuseScore control.
 - `prepare_measure_repeat(start_measure, end_measure, bars, first_staff, last_staff)` - Select bars for a 1/2/4-bar measure-repeat sign, which you then click in the palette (the manual alternative to `apply_measure_repeats`)
 - `color_range(...)` / `clear_color(...)` - Color notes and rests in a range of measures and staves, or reset them to black. `start_beat`/`end_beat` limit it to part of a bar (e.g. a fill on beats 3-4)
 - `highlight_bars(start_measure, end_measure, first_staff, last_staff, color, opacity, start_beat, end_beat)` - Highlighter-pen band behind the bars of each staff (a thick semi-transparent line that follows the bars across line breaks; experimental)
+- `highlight_notes(start_measure, end_measure, first_staff, last_staff, drums, pitches, start_beat, end_beat, color, opacity)` - Full-staff-height translucent box around each matching hit, sized to the note (touching hits share a box); `drums=["crash"]` picks the crash in a kick+crash chord
+- `highlight_symbols(start_measure, end_measure, first_staff, last_staff, kinds, mode, color, opacity, clear)` - Highlight (pastel light blue box) or recolor time signatures, repeat barlines and measure-repeat signs
+- `highlight_markings(start_measure, end_measure, first_staff, last_staff, types, color, opacity)` - Translucent box behind each dynamic (f, mf, ff) or other marking; `get_score` lists the markings per measure
 - `add_label(measure, text, staff, background, border)` - Label in a colored box at a measure, e.g. "Groove x7"
-- `clear_highlights(start_measure, end_measure, first_staff, last_staff, kinds)` - Remove highlight bands and boxed labels
+- `clear_highlights(start_measure, end_measure, first_staff, last_staff, kinds)` - Remove highlight bands, note boxes, marking boxes and boxed labels
 
 ### **Drum Charts & Measure-Repeat Signs**
 - `find_groove_sections(staves, start_measure, end_measure, tolerance)` - Section map of a groove part (drums by default): groove bar, exact copies, near copies with the hits that differ, and fills, plus ready-made repeat-sign groups for the exact copies

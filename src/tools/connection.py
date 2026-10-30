@@ -79,6 +79,13 @@ def setup_connection_tools(mcp, client: MuseScoreClient):
 
         meta_str = ", ".join(meta) if meta else "Aucune métadonnée"
         text = f"[Métadonnées] {meta_str}\n[Partition]\n{lily_str}"
+        markings = [
+            f"m.{m['measure']} beat {(mk['startTick'] - m['startTick']) / 480 + 1:g}, staff {mk['staff']}: "
+            f"{mk['name']} {mk.get('text', '')}".rstrip() + (" (highlighted)" if mk.get("highlighted") else "")
+            for m in analysis.get("measures", []) for mk in m.get("markings", [])
+        ]
+        if markings:
+            text += "\n[Markings]\n" + "\n".join(markings)
         if shown and total is not None and shown[-1] < total:
             text += f"\n[More measures: call get_score(start_measure={shown[-1] + 1}) to continue]"
         return text

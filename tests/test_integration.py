@@ -509,3 +509,67 @@ def test_beats_outside_the_bar_are_errors():
         assert result.is_error and "empty" in result.content[0].text
 
     run_with_mock(scenario, demo_score())
+
+
+def crash_and_kick_score():
+    """Drum staff: bar 1 has kick+crash on beat 1, then kick+snare, plus an f and an mf dynamic."""
+    mock = MockMuseScore(MockScore(staves=1, measures=2))
+    for pitches in ((36, 57), (36, 38), (36,), (38,)):
+        mock.process_command({"action": "addNote", "params": {
+            "pitch": pitches[0], "duration": QUARTER, "advanceCursorAfterAction": len(pitches) == 1}})
+        for extra in pitches[1:]:
+            mock.process_command({"action": "addNote", "params": {
+                "pitch": extra, "duration": QUARTER, "advanceCursorAfterAction": True, "addToChord": True}})
+            mock.score.cursor_tick = mock.score.elements[0][-1]["startTick"] + 480
+    score = mock.score
+    score.drum_staves = {0}
+    score.markings = [{"staff": 0, "startTick": 0, "name": "Dynamic", "text": "f"},
+                      {"staff": 0, "startTick": 1920, "name": "Dynamic", "text": "mf"}]
+    score.cursor_tick = 0
+    return score
+
+
+def test_highlight_notes_marks_only_the_crash():
+    async def scenario(c, mock):
+        result = (await c.call_tool("highlight_notes", {"start_measure": 1, "drums": ["crashes"]})).data
+        assert result["highlighted"] == 1
+        assert list(mock.score.note_highlights) == [(0, 0, 57)]
+        assert mock.commands[-1]["params"]["pitches"] == [49, 57]
+        assert mock.commands[-1]["params"]["color"] == "#73ffd600"
+
+        bad = await c.call_tool("highlight_notes", {"start_measure": 1, "drums": ["gong"]}, raise_on_error=False)
+        assert bad.is_error and "Unknown drum" in bad.content[0].text
+
+    run_with_mock(scenario, crash_and_kick_score())
+
+
+def test_dynamics_are_listed_highlighted_and_cleared():
+    async def scenario(c, mock):
+        text = (await c.call_tool("get_score", {})).content[0].text
+        assert "[Markings]\nm.1 beat 1, staff 0: Dynamic f\nm.2 beat 1, staff 0: Dynamic mf" in text
+
+        result = (await c.call_tool("highlight_markings", {})).data
+        assert result["found"] == 2
+        assert all(mk["highlight"] == "#8cffd600" for mk in mock.score.markings)
+        assert "Dynamic f (highlighted)" in (await c.call_tool("get_score", {})).content[0].text
+
+        await c.call_tool("highlight_notes", {"start_measure": 1})
+        cleared = (await c.call_tool("clear_highlights", {"kinds": ["markings", "notes"]})).data
+        assert cleared["removed"] == 2 + 6  # two dynamics, six noteheads in bar 1
+        assert not any(mk["highlight"] for mk in mock.score.markings) and not mock.score.note_highlights
+
+    run_with_mock(scenario, crash_and_kick_score())
+
+
+def test_highlight_symbols_modes():
+    async def scenario(c, mock):
+        await c.call_tool("highlight_symbols", {"start_measure": 1, "end_measure": 2})
+        await c.call_tool("highlight_symbols", {"kinds": ["repeat_barlines"], "mode": "color", "color": "#5dade2"})
+        first, second = mock.score.symbol_requests
+        assert first["mode"] == "highlight" and first["color"] == "#99a7d8f0"
+        assert first["kinds"] == ["time_signatures", "repeat_barlines", "measure_repeats"]
+        assert second == {**second, "mode": "color", "color": "#5dade2", "kinds": ["repeat_barlines"], "endMeasure": 4}
+        bad = await c.call_tool("highlight_symbols", {"mode": "color", "color": "blue"}, raise_on_error=False)
+        assert bad.is_error
+
+    run_with_mock(scenario)

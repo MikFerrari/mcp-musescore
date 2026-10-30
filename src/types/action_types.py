@@ -293,12 +293,59 @@ class clearHighlightsParams(TypedDict):
     endMeasure: NotRequired[int]
     startStaff: NotRequired[int]
     endStaff: NotRequired[int]
-    kinds: NotRequired[List[Literal["highlights", "labels"]]]
+    kinds: NotRequired[List[Literal["highlights", "notes", "markings", "labels"]]]
 
 
 class clearHighlightsAction(TypedDict):
     action: Literal["clearHighlights"]
     params: clearHighlightsParams
+
+
+class highlightNotesParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+    startBeat: NotRequired[float]
+    endBeat: NotRequired[float]
+    pitches: NotRequired[List[int]]
+    color: NotRequired[str]
+
+
+class highlightNotesAction(TypedDict):
+    action: Literal["highlightNotes"]
+    params: highlightNotesParams
+
+
+class highlightMarkingsParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+    types: NotRequired[List[str]]
+    color: NotRequired[str]
+    clear: NotRequired[bool]
+
+
+class highlightMarkingsAction(TypedDict):
+    action: Literal["highlightMarkings"]
+    params: highlightMarkingsParams
+
+
+class highlightSymbolsParams(TypedDict):
+    startMeasure: int
+    endMeasure: NotRequired[int]
+    startStaff: NotRequired[int]
+    endStaff: NotRequired[int]
+    kinds: NotRequired[List[Literal["time_signatures", "repeat_barlines", "measure_repeats"]]]
+    mode: NotRequired[Literal["highlight", "color"]]
+    color: NotRequired[str]
+    clear: NotRequired[bool]
+
+
+class highlightSymbolsAction(TypedDict):
+    action: Literal["highlightSymbols"]
+    params: highlightSymbolsParams
 
 
 ActionSequence = List[
@@ -311,5 +358,6 @@ ActionSequence = List[
     undoAction | nextStaffAction | prevStaffAction | setTempoAction |
     selectMeasuresAction | deleteMeasuresAction | setRepeatBarlinesAction |
     addVoltaAction | colorRangeAction | setStyleAction | addRehearsalMarkAction |
-    removePartsAction | addHighlightAction | addLabelAction | clearHighlightsAction
+    removePartsAction | addHighlightAction | addLabelAction | clearHighlightsAction |
+    highlightNotesAction | highlightMarkingsAction | highlightSymbolsAction
 ]

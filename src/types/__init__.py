@@ -38,4 +38,7 @@ __all__ = [
     "addHighlightAction",
     "addLabelAction",
     "clearHighlightsAction",
+    "highlightNotesAction",
+    "highlightMarkingsAction",
+    "highlightSymbolsAction",
 ]

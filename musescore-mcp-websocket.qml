@@ -90,6 +90,9 @@ MuseScore {
             case "addRehearsalMark":        return addRehearsalMark(command.params);
             case "addHighlight":            return addHighlight(command.params);
             case "addLabel":                return addLabel(command.params);
+            case "highlightNotes":          return highlightNotes(command.params);
+            case "highlightMarkings":       return highlightMarkings(command.params);
+            case "highlightSymbols":        return highlightSymbols(command.params);
             case "clearHighlights":         return clearHighlights(command.params);
 
             // Score files & parts
@@ -406,7 +409,8 @@ MuseScore {
             "goToBeginningOfScore", "setTimeSignature", "addLyrics", "addInstrument",
             "setStaffMute", "setInstrumentSound", "setTempo",
             "selectMeasures", "setRepeatBarlines", "addVolta", "colorRange", "deleteMeasures",
-            "setStyle", "addRehearsalMark", "removeParts", "addHighlight", "addLabel", "clearHighlights"
+            "setStyle", "addRehearsalMark", "removeParts", "addHighlight", "addLabel", "clearHighlights",
+            "highlightNotes", "highlightMarkings", "highlightSymbols"
         ];
 
         try {
@@ -1360,8 +1364,10 @@ MuseScore {
         });
     }
 
-    // Highlighter: a thick, semi-transparent text line drawn behind one staff's notes over a range of
-    // measures; it follows the bars across system breaks. Experimental: added through Cursor.add.
+    // Highlighter band: a thick, semi-transparent text line behind one staff's notes over a range of
+    // measures (or beats); it follows the bars across system breaks. A line's drawn segments only exist
+    // after layout, so the score is laid out mid-command and the segments are then moved onto the staff
+    // with automatic placement off (otherwise MuseScore pushes the band above the notes).
     function addHighlight(params) {
         if (!curScore) return { error: "No score open" };
         var range = measureRange(params);
@@ -1370,10 +1376,11 @@ MuseScore {
         if (range.error) return range;
 
         var color = params.color || "#59FFE600";
-        var width = params.width !== undefined ? params.width : 3.0;      // spatium; a 5-line staff is 4 spaces
-        var offsetY = params.offsetY !== undefined ? params.offsetY : 2.0;
+        var width = params.width !== undefined ? params.width : 5.0;          // spatium: the 4-space staff plus 0.5 above and below
+        var offsetY = params.offsetY !== undefined ? params.offsetY : bandOffsetY(2);   // centers the band on the staff
 
         return executeWithUndo(function() {
+            var lines = [];
             for (var s = range.startStaff; s < range.endStaff; s++) {
                 var line = newElement(Element.TEXTLINE);
                 line.spannerTick = fraction(range.startTick, 1920);
@@ -1382,7 +1389,6 @@ MuseScore {
                 line.lineWidth = width;
                 line.lineColor = color;
                 line.autoplace = false;
-                line.offset = Qt.point(0, offsetY);
                 line.z = 1;
 
                 var cursor = curScore.newCursor();
@@ -1390,15 +1396,286 @@ MuseScore {
                 cursor.voice = 0;
                 cursor.rewindToTick(range.startTick);
                 cursor.add(line);
+                lines.push(line);
+            }
+
+            curScore.doLayout(fraction(range.startTick, 1920), fraction(range.endTick, 1920));
+            var placed = 0;
+            for (var i = 0; i < lines.length; i++) {
+                var segments = lines[i].spannerSegments || [];
+                for (var j = 0; j < segments.length; j++) {
+                    segments[j].autoplace = false;
+                    segments[j].offset = Qt.point(0, offsetY);
+                    placed++;
+                }
             }
             return {
                 success: true,
                 experimental: true,
-                added: range.endStaff - range.startStaff,
+                added: lines.length,
+                placedSegments: placed,
                 message: "Highlighted measures " + range.startMeasure + "-" + range.endMeasure +
                          " on staves " + range.startStaff + "-" + (range.endStaff - 1)
             };
         });
+    }
+
+    // Offset that puts the center of a highlight line (autoplace off) at centerY spaces below the staff's top
+    // line. Measured by rendering with the default text line style (textLinePosAbove = (0, -1)), where the
+    // offset equals the center; adjusted if the score changes that style.
+    function bandOffsetY(centerY) {
+        var pos = curScore.style ? curScore.style.value("textLinePosAbove") : null;
+        var y = pos && typeof pos.y === "number" && Math.abs(pos.y) < 20 ? pos.y : -1;
+        return centerY + (-1 - y);
+    }
+
+    // Page y of a staff's top line in a measure: the y of that staff's barline, else the measure's own y.
+    function staffTopY(m, staff) {
+        for (var seg = m.firstSegment; seg; seg = seg.nextInMeasure) {
+            var el = seg.elementAt(staff * 4);
+            if (el && el.name === "BarLine") return el.pagePos.y;
+        }
+        return m.pagePos.y;
+    }
+
+    // Extent of a laid-out element: x on the page, y relative to its staff's top line, in spaces.
+    function elementExtent(el, staffTop) {
+        var p = el.pagePos;
+        var b = el.bbox;
+        return { x0: p.x + b.x, x1: p.x + b.x + b.width, y0: p.y + b.y - staffTop, y1: p.y + b.y + b.height - staffTop };
+    }
+
+    function extentFor(el, m, staff, pad) {
+        var top = staffTopY(m, staff);
+        var e = elementExtent(el, top);
+        return { measure: m, staff: staff, systemY: top, x0: e.x0 - pad, x1: e.x1 + pad, y0: e.y0 - pad, y1: e.y1 + pad };
+    }
+
+    // Merge extents that overlap (or nearly touch) horizontally on the same staff and system.
+    function mergeExtents(extents, gap) {
+        extents.sort(function(a, b) { return a.staff - b.staff || a.systemY - b.systemY || a.x0 - b.x0; });
+        var merged = [];
+        for (var i = 0; i < extents.length; i++) {
+            var e = extents[i];
+            var last = merged.length ? merged[merged.length - 1] : null;
+            if (last && last.staff === e.staff && Math.abs(last.systemY - e.systemY) < 0.01 && e.x0 <= last.x1 + gap) {
+                last.x1 = Math.max(last.x1, e.x1);
+                last.y0 = Math.min(last.y0, e.y0);
+                last.y1 = Math.max(last.y1, e.y1);
+            } else {
+                merged.push({ measure: e.measure, staff: e.staff, systemY: e.systemY, x0: e.x0, x1: e.x1, y0: e.y0, y1: e.y1 });
+            }
+        }
+        return merged;
+    }
+
+    // Translucent boxes covering page x-ranges over the full staff height (plus margin), stretched further
+    // to cover the box's elements when they stick out of the staff (y0/y1, relative to the top line).
+    // A text line per box, anchored to the box's measure, then (after a mid-command layout) moved and
+    // resized to the exact range. Call inside a command.
+    function addColumnBoxes(boxes, color, margin) {
+        for (var k = 0; k < boxes.length; k++) {
+            var b = boxes[k];
+            b.top = Math.min(-margin, b.y0 !== undefined ? b.y0 : 0);
+            b.bottom = Math.max(4 + margin, b.y1 !== undefined ? b.y1 : 4);
+        }
+        var lines = [];
+        var minTick = -1, maxTick = 0;
+        for (var i = 0; i < boxes.length; i++) {
+            var m = boxes[i].measure;
+            var start = measureStartTick(m);
+            var end = measureEndTick(m);
+            var line = newElement(Element.TEXTLINE);
+            line.spannerTick = fraction(start, 1920);
+            line.spannerTicks = fraction(end - start, 1920);
+            line.spannerTrack2 = boxes[i].staff * 4;
+            line.lineWidth = boxes[i].bottom - boxes[i].top;
+            line.lineColor = color;
+            line.autoplace = false;
+            line.z = 1;
+            var cursor = curScore.newCursor();
+            cursor.staffIdx = boxes[i].staff;
+            cursor.voice = 0;
+            cursor.rewindToTick(start);
+            cursor.add(line);
+            lines.push(line);
+            if (minTick < 0 || start < minTick) minTick = start;
+            if (end > maxTick) maxTick = end;
+        }
+        if (!lines.length) return 0;
+
+        curScore.doLayout(fraction(minTick, 1920), fraction(maxTick, 1920));
+        var placed = 0;
+        for (var j = 0; j < lines.length; j++) {
+            var segments = lines[j].spannerSegments || [];
+            if (!segments.length) continue;
+            var seg = segments[0];
+            var startX = seg.pagePos.x;
+            var length = seg.pos2.x;
+            seg.autoplace = false;
+            seg.offset = Qt.point(boxes[j].x0 - startX, bandOffsetY((boxes[j].top + boxes[j].bottom) / 2));
+            seg.userOff2 = Qt.point((boxes[j].x1 - boxes[j].x0) - length, 0);
+            placed++;
+        }
+        return placed;
+    }
+
+    // Full-height boxes around individual notes (e.g. only the crash of a kick+crash chord). Hits whose
+    // boxes would touch are merged into one box.
+    function highlightNotes(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+        range = applyBeats(range, params);
+        if (range.error) return range;
+
+        var color = params.color || "#73FFD600";
+        var pitches = params.pitches && params.pitches.length ? params.pitches : null;
+        var voices = params.voices && params.voices.length ? params.voices : [0, 1, 2, 3];
+        var pad = params.padding !== undefined ? params.padding : 0.2;
+        var margin = params.margin !== undefined ? params.margin : 0.5;
+
+        var extents = [];
+        var hits = 0;
+        for (var m = range.firstMeasure; m; m = m.nextMeasure) {
+            for (var seg = m.firstSegment; seg; seg = seg.nextInMeasure) {
+                if (seg.tick < range.startTick || seg.tick >= range.endTick) continue;
+                for (var s = range.startStaff; s < range.endStaff; s++) {
+                    for (var v = 0; v < voices.length; v++) {
+                        var el = seg.elementAt(s * 4 + voices[v]);
+                        if (!el || el.name !== "Chord") continue;
+                        var notes = el.notes || [];
+                        for (var n = 0; n < notes.length; n++) {
+                            if (pitches && pitches.indexOf(notes[n].pitch) === -1) continue;
+                            extents.push(extentFor(notes[n], m, s, pad));
+                            hits++;
+                        }
+                    }
+                }
+            }
+            if (measureStartTick(m) >= measureStartTick(range.lastMeasure)) break;
+        }
+        if (!hits) return { success: true, highlighted: 0, boxes: 0, message: "No matching notes in the range" };
+
+        var boxes = mergeExtents(extents, 2 * pad);
+        return executeWithUndo(function() {
+            var placed = addColumnBoxes(boxes, color, margin);
+            return { success: true, highlighted: hits, boxes: placed,
+                     message: "Highlighted " + hits + " note(s) with " + placed + " box(es)" };
+        });
+    }
+
+    function isRepeatBarline(barline) {
+        var type = barline.barlineType;
+        return (type & (4 | 8 | 64)) !== 0;  // start repeat, end repeat, end-start repeat
+    }
+
+    // Time signatures, repeat barlines and measure-repeat signs in a range: highlighted with full-height
+    // boxes (mode "highlight") or recolored (mode "color"; clear resets them to black).
+    function highlightSymbols(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+        var kinds = params.kinds && params.kinds.length ? params.kinds : ["time_signatures", "repeat_barlines", "measure_repeats"];
+        var mode = params.mode || "highlight";
+        var color = params.color || (mode === "color" ? "#5DADE2" : "#99A7D8F0");
+        if (params.clear) color = "#000000";
+        var pad = params.padding !== undefined ? params.padding : 0.25;
+        var margin = params.margin !== undefined ? params.margin : 0.5;
+
+        var found = [];
+        var counts = { time_signatures: 0, repeat_barlines: 0, measure_repeats: 0 };
+        for (var m = range.firstMeasure; m; m = m.nextMeasure) {
+            for (var seg = m.firstSegment; seg; seg = seg.nextInMeasure) {
+                for (var s = range.startStaff; s < range.endStaff; s++) {
+                    var el = seg.elementAt(s * 4);
+                    if (!el) continue;
+                    var kind = null;
+                    if (el.name === "TimeSig") kind = "time_signatures";
+                    else if (el.name === "BarLine" && isRepeatBarline(el)) kind = "repeat_barlines";
+                    else if (el.name === "MeasureRepeat") kind = "measure_repeats";
+                    if (!kind || kinds.indexOf(kind) === -1) continue;
+                    found.push({ element: el, measure: m, staff: s });
+                    counts[kind]++;
+                }
+            }
+            if (measureStartTick(m) >= measureStartTick(range.lastMeasure)) break;
+        }
+        if (!found.length) return { success: true, found: counts, message: "No matching symbols in the range" };
+
+        return executeWithUndo(function() {
+            if (mode === "color") {
+                for (var i = 0; i < found.length; i++) found[i].element.color = color;
+                return { success: true, found: counts, message: (params.clear ? "Reset " : "Colored ") + found.length + " symbol(s)" };
+            }
+            var extents = [];
+            for (var j = 0; j < found.length; j++) {
+                extents.push(extentFor(found[j].element, found[j].measure, found[j].staff, pad));
+            }
+            var placed = addColumnBoxes(mergeExtents(extents, 0), color, margin);
+            return { success: true, found: counts, boxes: placed, message: "Highlighted " + found.length + " symbol(s) with " + placed + " box(es)" };
+        });
+    }
+
+    // A translucent box behind markings such as dynamics, set on each marking's own text frame.
+    function highlightMarkings(params) {
+        if (!curScore) return { error: "No score open" };
+        var range = measureRange(params);
+        if (!range.valid) return range;
+        var types = params.types && params.types.length ? params.types : ["Dynamic"];
+        var color = params.color || "#8CFFD600";
+        var clear = params.clear === true;
+
+        return executeWithUndo(function() {
+            var count = 0;
+            var found = forEachMarking(range, types, function(marking) {
+                if (clear) {
+                    if (isMarkingHighlight(marking)) {
+                        marking.frameType = 0;
+                        count++;
+                    }
+                } else {
+                    marking.frameType = 1;
+                    marking.frameBgColor = color;
+                    marking.frameFgColor = "#00000000";
+                    count++;
+                }
+            });
+            return {
+                success: true,
+                found: found,
+                changed: count,
+                message: (clear ? "Removed the highlight from " : "Highlighted ") + count + " of " + found +
+                         " marking(s) (" + types.join(", ") + ")"
+            };
+        });
+    }
+
+    // Call fn for each annotation of the given types (Dynamic, StaffText, Tempo, ...) in the range; returns how many.
+    function forEachMarking(range, types, fn) {
+        var found = 0;
+        var seg = range.firstMeasure.firstSegment;
+        while (seg && seg.tick < range.endTick) {
+            var annotations = seg.annotations || [];
+            for (var a = 0; a < annotations.length; a++) {
+                var ann = annotations[a];
+                var staff = Math.floor(ann.track / 4);
+                if (types.indexOf(ann.name) !== -1 && staff >= range.startStaff && staff < range.endStaff) {
+                    found++;
+                    fn(ann, seg);
+                }
+            }
+            seg = seg.next;
+        }
+        return found;
+    }
+
+    function isTranslucent(color) {
+        return color && color.a !== undefined && color.a < 1;
+    }
+
+    function isMarkingHighlight(marking) {
+        return marking.frameType && isTranslucent(marking.frameBgColor);
     }
 
     // A staff text in a colored box, e.g. a section tag.
@@ -1424,17 +1701,23 @@ MuseScore {
     }
 
     function isHighlightLine(spanner) {
-        var color = spanner.lineColor;
-        return spanner.name === "TextLine" && spanner.autoplace === false && color && color.a !== undefined && color.a < 1;
+        return spanner.name === "TextLine" && spanner.autoplace === false && isTranslucent(spanner.lineColor);
     }
 
-    // Remove highlights (addHighlight lines) and boxed labels (addLabel texts) in a range.
+    function isNoteHighlight(element) {
+        return element.name === "Symbol" && isTranslucent(element.color);
+    }
+
+    // Remove what the highlight tools added in a range: bands (addHighlight), note boxes (highlightNotes),
+    // marking boxes (highlightMarkings) and boxed labels (addLabel).
     function clearHighlights(params) {
         if (!curScore) return { error: "No score open" };
         var range = measureRange(params);
         if (!range.valid) return range;
-        var kinds = params.kinds && params.kinds.length ? params.kinds : ["highlights", "labels"];
+        var kinds = params.kinds && params.kinds.length ? params.kinds : ["highlights", "notes", "markings", "labels"];
         var targets = [];
+        var removedNotes = 0;
+        var clearedMarkings = 0;
 
         if (kinds.indexOf("highlights") !== -1) {
             var spanners = curScore.spanners || [];
@@ -1449,28 +1732,58 @@ MuseScore {
             }
         }
         if (kinds.indexOf("labels") !== -1) {
-            var seg = range.firstMeasure.firstSegment;
-            while (seg && seg.tick < range.endTick) {
-                var annotations = seg.annotations || [];
-                for (var a = 0; a < annotations.length; a++) {
-                    var ann = annotations[a];
-                    var annStaff = Math.floor(ann.track / 4);
-                    if (ann.name === "StaffText" && ann.frameType && annStaff >= range.startStaff && annStaff < range.endStaff) {
-                        targets.push(ann);
-                    }
-                }
-                seg = seg.next;
-            }
+            forEachMarking(range, ["StaffText"], function(ann) {
+                if (ann.frameType && !isTranslucent(ann.frameBgColor)) targets.push(ann);
+            });
         }
 
-        if (targets.length === 0) return { success: true, removed: 0, message: "Nothing to remove" };
-        curScore.selection.clear();
-        for (var t = 0; t < targets.length; t++) {
-            curScore.selection.select(targets[t], true);
-        }
-        cmd("delete");
-        curScore.selection.clear();
-        return { success: true, removed: targets.length, message: "Removed " + targets.length + " highlight(s)/label(s)" };
+        var result = executeWithUndo(function() {
+            for (var t = 0; t < targets.length; t++) {
+                removeElement(targets[t]);
+            }
+            if (kinds.indexOf("notes") !== -1) {
+                var seg = range.firstMeasure.firstSegment;
+                while (seg && seg.tick < range.endTick) {
+                    for (var s = range.startStaff; s < range.endStaff; s++) {
+                        for (var v = 0; v < 4; v++) {
+                            var el = seg.elementAt(s * 4 + v);
+                            if (!el || el.name !== "Chord") continue;
+                            var notes = el.notes || [];
+                            for (var n = 0; n < notes.length; n++) {
+                                var children = notes[n].elements || [];
+                                var boxes = [];
+                                for (var c = 0; c < children.length; c++) {
+                                    if (isNoteHighlight(children[c])) boxes.push(children[c]);
+                                }
+                                for (var b = 0; b < boxes.length; b++) {
+                                    notes[n].remove(boxes[b]);
+                                    removedNotes++;
+                                }
+                            }
+                        }
+                    }
+                    seg = seg.next;
+                }
+            }
+            if (kinds.indexOf("markings") !== -1) {
+                forEachMarking(range, ["Dynamic", "StaffText", "SystemText", "Tempo", "Expression"], function(ann) {
+                    if (isMarkingHighlight(ann)) {
+                        ann.frameType = 0;
+                        clearedMarkings++;
+                    }
+                });
+            }
+            return { success: true };
+        });
+        if (result && result.error) return result;
+
+        var removed = targets.length + removedNotes + clearedMarkings;
+        return {
+            success: true,
+            removed: removed,
+            message: removed ? "Removed " + targets.length + " band(s)/label(s), " + removedNotes + " note box(es), " +
+                               clearedMarkings + " marking highlight(s)" : "Nothing to remove"
+        };
     }
 
     // Experimental, like addVolta: rehearsal marks have no dedicated API, so they go through Cursor.add.
@@ -1658,6 +1971,7 @@ MuseScore {
                     entry.elements[`staff${staffIndices[j]}`] = [];
                 }
 
+                entry.markings = [];
                 var seg = m.firstSegment;
                 while (seg && seg.tick < endTick) {
                     for (var k = 0; k < staffIndices.length; k++) {
@@ -1670,6 +1984,19 @@ MuseScore {
                                 entry.numElements++;
                             }
                         }
+                    }
+                    var annotations = seg.annotations || [];
+                    for (var a = 0; a < annotations.length; a++) {
+                        var ann = annotations[a];
+                        var annStaff = Math.floor(ann.track / 4);
+                        if (staffIndices.indexOf(annStaff) === -1) continue;
+                        entry.markings.push({
+                            name: ann.name,
+                            text: typeof ann.subtypeName === "function" && ann.name === "Dynamic" ? ann.subtypeName() : (ann.text || ""),
+                            staff: annStaff,
+                            startTick: seg.tick,
+                            highlighted: isMarkingHighlight(ann) ? true : false
+                        });
                     }
                     seg = seg.next;
                 }

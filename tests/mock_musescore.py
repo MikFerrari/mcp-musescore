@@ -27,6 +27,7 @@ SEQUENCE_ACTIONS = {
     "setStaffMute", "setInstrumentSound", "setTempo",
     "selectMeasures", "setRepeatBarlines", "addVolta", "colorRange", "deleteMeasures",
     "setStyle", "addRehearsalMark", "removeParts", "addHighlight", "addLabel", "clearHighlights",
+    "highlightNotes", "highlightMarkings", "highlightSymbols",
 }
 
 TPC_BY_PITCH_CLASS = [14, 21, 16, 23, 18, 13, 20, 15, 22, 17, 24, 19]
@@ -60,6 +61,9 @@ class MockScore:
         self.rehearsal_marks: List[Dict[str, Any]] = []
         self.highlights: List[Dict[str, Any]] = []  # {"staff", "startMeasure", "endMeasure", "color"}
         self.labels: List[Dict[str, Any]] = []  # {"staff", "measure", "text", "background"}
+        self.note_highlights: Dict[tuple, str] = {}  # (staff, startTick, pitch) -> color
+        self.markings: List[Dict[str, Any]] = []  # {"staff", "startTick", "name", "text", "highlight"}
+        self.symbol_requests: List[Dict[str, Any]] = []  # highlightSymbols calls (the mock has no symbols to find)
         self.score_name = title
 
     @property
@@ -85,6 +89,11 @@ class MockScore:
                 }
                 entry["numElements"] = sum(len(v) for v in per_staff.values())
                 entry["elements"] = per_staff
+                entry["markings"] = [
+                    {"name": mk["name"], "text": mk["text"], "staff": mk["staff"], "startTick": mk["startTick"],
+                     "highlighted": mk.get("highlight") is not None}
+                    for mk in self.markings if mk["staff"] in staves and start <= mk["startTick"] < end
+                ]
             measures.append(entry)
         return {
             "title": self.title,
@@ -522,24 +531,80 @@ class MockMuseScore:
                                   "background": params.get("background")})
         return {"success": True}
 
+    def _do_highlightNotes(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        rng = self._apply_beats(rng, params)
+        if "error" in rng:
+            return rng
+        self._mutating()
+        pitches = params.get("pitches")
+        count = 0
+        for staff in range(rng["startStaff"], rng["endStaff"]):
+            for e in self.score.elements[staff]:
+                if e["name"] != "Chord" or not rng["startTick"] <= e["startTick"] < rng["endTick"]:
+                    continue
+                for note in e["notes"]:
+                    if pitches and note["pitchMidi"] not in pitches:
+                        continue
+                    self.score.note_highlights[(staff, e["startTick"], note["pitchMidi"])] = params.get("color")
+                    count += 1
+        return {"success": True, "highlighted": count}
+
+    def _do_highlightSymbols(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        self._mutating()
+        self.score.symbol_requests.append(params)
+        return {"success": True, "found": {"time_signatures": 1, "repeat_barlines": 0, "measure_repeats": 0},
+                "message": "Highlighted 1 symbol(s)"}
+
+    def _markings_in(self, rng, types):
+        return [mk for mk in self.score.markings
+                if mk["name"] in types and rng["startStaff"] <= mk["staff"] < rng["endStaff"]
+                and rng["startTick"] <= mk["startTick"] < rng["endTick"]]
+
+    def _do_highlightMarkings(self, params):
+        rng = self._range(params)
+        if "error" in rng:
+            return rng
+        self._mutating()
+        found = self._markings_in(rng, params.get("types") or ["Dynamic"])
+        for mk in found:
+            mk["highlight"] = None if params.get("clear") else params.get("color")
+        return {"success": True, "found": len(found), "changed": len(found)}
+
     def _do_clearHighlights(self, params):
         rng = self._range(params)
         if "error" in rng:
             return rng
-        kinds = params.get("kinds") or ["highlights", "labels"]
+        kinds = params.get("kinds") or ["highlights", "notes", "markings", "labels"]
 
         def inside(staff, measure):
             return (rng["startStaff"] <= staff < rng["endStaff"]
                     and rng["startMeasure"] <= measure <= rng["endMeasure"])
 
-        before = len(self.score.highlights) + len(self.score.labels)
+        score = self.score
+        before = len(score.highlights) + len(score.labels) + len(score.note_highlights)
+        before += sum(1 for mk in score.markings if mk.get("highlight"))
         self._mutating()
         if "highlights" in kinds:
-            self.score.highlights = [h for h in self.score.highlights if not inside(h["staff"], h["startMeasure"])]
+            score.highlights = [h for h in score.highlights if not inside(h["staff"], h["startMeasure"])]
         if "labels" in kinds:
-            self.score.labels = [l for l in self.score.labels if not inside(l["staff"], l["measure"])]
-        removed = before - len(self.score.highlights) - len(self.score.labels)
-        return {"success": True, "removed": removed}
+            score.labels = [l for l in score.labels if not inside(l["staff"], l["measure"])]
+        if "notes" in kinds:
+            score.note_highlights = {
+                k: c for k, c in score.note_highlights.items()
+                if not (rng["startStaff"] <= k[0] < rng["endStaff"] and rng["startTick"] <= k[1] < rng["endTick"])
+            }
+        if "markings" in kinds:
+            for mk in self._markings_in(rng, ["Dynamic", "StaffText", "SystemText", "Tempo", "Expression"]):
+                mk["highlight"] = None
+        after = len(score.highlights) + len(score.labels) + len(score.note_highlights)
+        after += sum(1 for mk in score.markings if mk.get("highlight"))
+        return {"success": True, "removed": before - after}
 
     def _do_scoreFileInfo(self, params):
         return {"success": True, "scoreName": self.score.score_name, "title": self.score.title,
